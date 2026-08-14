@@ -170,6 +170,38 @@ def download_instagram(message):
                 pass
 
 # --- ОБРАБОТКА YOUTUBE SHORTS ---
+def download_youtube_cobalt(url, filename):
+    """Обход блокировок облачных серверов YouTube через API"""
+    instances = [
+        "https://api.cobalt.tools",
+        "https://cobalt-api.kwippy.com",
+        "https://cobalt.stream"
+    ]
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
+    data = {"url": url}
+    
+    for api_endpoint in instances:
+        try:
+            res = requests.post(f"{api_endpoint}/", json=data, headers=headers, timeout=12)
+            if res.status_code == 200:
+                res_data = res.json()
+                video_link = res_data.get("url")
+                if video_link:
+                    v_res = requests.get(video_link, headers=HEADERS, stream=True, timeout=60)
+                    if v_res.status_code == 200:
+                        with open(filename, 'wb') as f:
+                            for chunk in v_res.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    f.write(chunk)
+                        if os.path.exists(filename) and os.path.getsize(filename) > 10000:
+                            return True
+        except Exception:
+            continue
+    return False
+
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
     status_msg = bot.reply_to(message, "⏳ Получаю видео из YouTube...")
@@ -179,19 +211,34 @@ def download_youtube(message):
     filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
     
     try:
+        download_success = False
+
+        # 1. Первая попытка: Быстрый API без капчи и авторизации
         bot.edit_message_text("⏳ Скачиваю YouTube Shorts...", message.chat.id, status_msg.message_id)
-        
-        ydl_opts = {
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': filename,
-            'quiet': True,
-            'no_warnings': True,
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-            
-        if os.path.exists(filename) and os.path.getsize(filename) > 10000:
+        download_success = download_youtube_cobalt(url, filename)
+
+        # 2. Вторая попытка: yt-dlp с маскировкой под официальные клиенты iOS / Android
+        if not download_success:
+            ydl_opts = {
+                'format': 'best[ext=mp4]/best',
+                'outtmpl': filename,
+                'quiet': True,
+                'no_warnings': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['ios', 'android', 'mweb']
+                    }
+                }
+            }
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                if os.path.exists(filename) and os.path.getsize(filename) > 10000:
+                    download_success = True
+            except Exception:
+                download_success = False
+
+        if download_success:
             bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
             with open(filename, 'rb') as video:
                 bot.send_video(
@@ -203,7 +250,7 @@ def download_youtube(message):
                 )
             bot.delete_message(message.chat.id, status_msg.message_id)
         else:
-            bot.edit_message_text("❌ Не удалось скачать видео с YouTube.", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("❌ Не удалось скачать видео с YouTube. Попробуйте еще раз или другую ссылку.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка при скачивании: {e}", message.chat.id, status_msg.message_id)
@@ -216,5 +263,5 @@ def download_youtube(message):
 
 if __name__ == '__main__':
     threading.Thread(target=run_web).start()
-    print("🚀 Бот запущен! Поддерживает TikTok, Instagram и YouTube Shorts.")
+    print("🚀 Бот запущен! Поддерживает TikTok, Instagram и YouTube Shorts (с обходом авторизации).")
     bot.infinity_polling()
