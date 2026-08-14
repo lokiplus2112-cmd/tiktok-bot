@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import uuid
 import threading
@@ -6,8 +7,9 @@ import telebot
 from telebot import apihelper
 import requests
 from flask import Flask
+import yt_dlp
 
-# --- Веб-сервер для работы на бесплатном тарифе Render ---
+# --- Веб-сервер для бесплатного тарифа Render ---
 app = Flask('')
 
 @app.route('/')
@@ -17,7 +19,7 @@ def home():
 def run_web():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
-# --------------------------------------------------------
+# ------------------------------------------------
 
 apihelper.CONNECT_TIMEOUT = 300
 apihelper.READ_TIMEOUT = 300
@@ -34,12 +36,13 @@ HEADERS = {
 def start_cmd(message):
     bot.reply_to(
         message, 
-        "👋 Привет! Отправь мне ссылку на видео из TikTok, и я скачаю его в оригинальном качестве!"
+        "👋 Привет! Отправь мне ссылку на видео из **TikTok** или **Instagram (Reels)**, и я скачаю его для тебя!"
     )
 
+# --- ОБРАБОТКА TIKTOK ---
 @bot.message_handler(func=lambda msg: msg.text and 'tiktok.com' in msg.text)
 def download_tiktok(message):
-    status_msg = bot.reply_to(message, "⏳ Получаю оригинальное видео...")
+    status_msg = bot.reply_to(message, "⏳ Получаю HD видео из TikTok...")
     url = message.text.strip()
     
     temp_dir = tempfile.gettempdir()
@@ -47,11 +50,15 @@ def download_tiktok(message):
     
     try:
         api_url = "https://www.tikwm.com/api/"
-        response = requests.post(api_url, data={'url': url}, headers=HEADERS, timeout=15).json()
+        response = requests.post(api_url, data={'url': url, 'hd': 1}, headers=HEADERS, timeout=15).json()
 
         if response.get('code') == 0:
-            video_url = response['data']['play']
+            data = response['data']
+            video_url = data.get('hdplay') or data.get('play')
             
+            if video_url and not video_url.startswith('http'):
+                video_url = 'https://www.tikwm.com' + video_url
+
             bot.edit_message_text("⏳ Скачиваю файл...", message.chat.id, status_msg.message_id)
             
             res = requests.get(video_url, headers=HEADERS, stream=True, timeout=60)
@@ -68,23 +75,97 @@ def download_tiktok(message):
                     message.chat.id, 
                     video, 
                     reply_to_message_id=message.message_id,
-                    caption="✅ Оригинальное видео готово!",
+                    caption="✅ TikTok видео в формате HD!",
                     timeout=300
                 )
             bot.delete_message(message.chat.id, status_msg.message_id)
         else:
-            bot.edit_message_text(
-                "❌ Не удалось найти видео по этой ссылке.", 
-                message.chat.id, 
-                status_msg.message_id
-            )
+            bot.edit_message_text("❌ Не удалось найти TikTok видео по этой ссылке.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
-        bot.edit_message_text(
-            f"❌ Ошибка: {e}", 
-            message.chat.id, 
-            status_msg.message_id
-        )
+        bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
+    finally:
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
+
+# --- ОБРАБОТКА INSTAGRAM ---
+def get_instagram_direct_url(url):
+    """Попытка мгновенно извлечь mp4 через ddinstagram / vxinstagram"""
+    for mirror in ['ddinstagram.com', 'vxinstagram.com']:
+        try:
+            mirror_url = url.replace('instagram.com', mirror).replace('instagr.am', mirror)
+            res = requests.get(mirror_url, headers=HEADERS, timeout=10)
+            if res.status_code == 200:
+                match = re.search(r'property="og:video(?::secure_url)?"\s+content="([^"]+)"', res.text)
+                if not match:
+                    match = re.search(r'content="([^"]+\.mp4[^"]*)"', res.text)
+                if match:
+                    return match.group(1).replace('&amp;', '&')
+        except Exception:
+            continue
+    return None
+
+@bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['instagram.com', 'instagr.am']))
+def download_instagram(message):
+    status_msg = bot.reply_to(message, "⏳ Получаю видео из Instagram...")
+    url = message.text.strip()
+    
+    temp_dir = tempfile.gettempdir()
+    filename = os.path.join(temp_dir, f"ig_{uuid.uuid4().hex}.mp4")
+    
+    try:
+        # 1. Быстрый способ через зеркала
+        video_url = get_instagram_direct_url(url)
+        download_success = False
+
+        if video_url:
+            try:
+                bot.edit_message_text("⏳ Скачиваю Instagram Reels...", message.chat.id, status_msg.message_id)
+                res = requests.get(video_url, headers=HEADERS, stream=True, timeout=60)
+                if res.status_code == 200:
+                    with open(filename, 'wb') as f:
+                        for chunk in res.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+                    if os.path.getsize(filename) > 10000:  # проверяем, что файл не пустой
+                        download_success = True
+            except Exception:
+                download_success = False
+
+        # 2. Резервный способ через yt-dlp
+        if not download_success:
+            bot.edit_message_text("⏳ Скачиваю видео (резервный канал)...", message.chat.id, status_msg.message_id)
+            ydl_opts = {
+                'format': 'b[ext=mp4]/b',
+                'outtmpl': filename,
+                'quiet': True,
+                'no_warnings': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            if os.path.exists(filename) and os.path.getsize(filename) > 10000:
+                download_success = True
+
+        # Отправка видео
+        if download_success:
+            bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
+            with open(filename, 'rb') as video:
+                bot.send_video(
+                    message.chat.id, 
+                    video, 
+                    reply_to_message_id=message.message_id,
+                    caption="✅ Видео из Instagram готово!",
+                    timeout=300
+                )
+            bot.delete_message(message.chat.id, status_msg.message_id)
+        else:
+            bot.edit_message_text("❌ Не удалось скачать видео с Instagram (возможно, аккаунт приватный).", message.chat.id, status_msg.message_id)
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка при скачивании: {e}", message.chat.id, status_msg.message_id)
     finally:
         if os.path.exists(filename):
             try:
@@ -93,8 +174,6 @@ def download_tiktok(message):
                 pass
 
 if __name__ == '__main__':
-    # Запуск веб-сервера в фоновом потоке
     threading.Thread(target=run_web).start()
-    
-    print("🚀 Бот запущен на Render!")
+    print("🚀 Бот запущен! Поддерживает TikTok и Instagram.")
     bot.infinity_polling()
