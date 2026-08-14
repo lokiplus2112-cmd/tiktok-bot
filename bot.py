@@ -27,11 +27,10 @@ apihelper.CUSTOM_REQUEST_TIMEOUT = 300
 TOKEN = '8276557838:AAH_wSAdcAlJwMp8c2wp7y8k0lnhVLePxVA'
 bot = telebot.TeleBot(TOKEN)
 
-MAX_FILE_SIZE = 48 * 1024 * 1024  # Лимит Telegram в 48 МБ
+MAX_FILE_SIZE = 48 * 1024 * 1024  # Лимит Telegram — 48 МБ
 
-# User-Agent Telegram бота, чтобы сайты отдавали OpenGraph метатеги
 HEADERS = {
-    'User-Agent': 'TelegramBot (like TwitterBot)'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 }
 
 @bot.message_handler(commands=['start'])
@@ -42,7 +41,7 @@ def start_cmd(message):
     )
 
 def parse_og_video_url(url, mirrors):
-    """Считывает прямую ссылку на .mp4 из OpenGraph тегов, используемых Telegram"""
+    """Считывание прямой ссылки из OpenGraph метатегов (для TikTok и Instagram)"""
     for mirror in mirrors:
         try:
             target_url = url
@@ -50,12 +49,9 @@ def parse_og_video_url(url, mirrors):
                 target_url = re.sub(r'https?://(www\.)?instagr(\.am|am\.com)', f'https://{mirror}', url)
             elif 'tiktok.com' in url:
                 target_url = re.sub(r'https?://(www\.|vm\.|vt\.)?tiktok\.com', f'https://{mirror}', url)
-            elif 'youtube.com' in url or 'youtu.be' in url:
-                target_url = re.sub(r'https?://(www\.)?(youtube\.com|youtu\.be)', f'https://{mirror}', url)
 
             res = requests.get(target_url, headers=HEADERS, timeout=10, allow_redirects=True)
             if res.status_code == 200:
-                # Поиск og:video или og:video:secure_url в коде страницы
                 match = re.search(r'property=["\']og:video(?::secure_url)?["\']\s+content=["\']([^"\']+)["\']', res.text, re.IGNORECASE)
                 if not match:
                     match = re.search(r'content=["\']([^"\']+\.mp4[^"\']*)["\']', res.text, re.IGNORECASE)
@@ -69,12 +65,12 @@ def parse_og_video_url(url, mirrors):
     return None
 
 def download_and_send(message, video_url, status_msg, caption):
-    """Скачивание файла по прямой ссылке и отправка пользователю"""
+    """Загрузка файла по ссылке и отправка в чат"""
     temp_dir = tempfile.gettempdir()
     filename = os.path.join(temp_dir, f"vid_{uuid.uuid4().hex}.mp4")
 
     try:
-        bot.edit_message_text("⏳ Загружаю видеофайл...", message.chat.id, status_msg.message_id)
+        bot.edit_message_text("⏳ Скачиваю видеофайл...", message.chat.id, status_msg.message_id)
         
         res = requests.get(video_url, headers=HEADERS, stream=True, timeout=90)
         res.raise_for_status()
@@ -116,10 +112,8 @@ def download_tiktok(message):
     status_msg = bot.reply_to(message, "⏳ Извлекаю видео из TikTok...")
     url = message.text.strip()
 
-    # 1. Парсинг через OpenGraph зеркала (vxtiktok / fxtiktok)
     direct_url = parse_og_video_url(url, ['vxtiktok.com', 'fxtiktok.com'])
 
-    # 2. Резерв через TikWM API
     if not direct_url:
         try:
             res = requests.post("https://www.tikwm.com/api/", data={'url': url, 'hd': 1}, headers=HEADERS, timeout=10).json()
@@ -134,7 +128,7 @@ def download_tiktok(message):
     if direct_url:
         download_and_send(message, direct_url, status_msg, "✅ TikTok видео!")
     else:
-        bot.edit_message_text("❌ Не удалось получить ссылку на видео TikTok.", message.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Не удалось получить видео TikTok.", message.chat.id, status_msg.message_id)
 
 # --- INSTAGRAM ---
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['instagram.com', 'instagr.am']))
@@ -142,7 +136,6 @@ def download_instagram(message):
     status_msg = bot.reply_to(message, "⏳ Извлекаю Instagram Reels...")
     url = message.text.strip()
 
-    # Парсинг через OpenGraph зеркала (ddinstagram / vxinstagram)
     direct_url = parse_og_video_url(url, ['ddinstagram.com', 'vxinstagram.com'])
 
     if direct_url:
@@ -150,29 +143,73 @@ def download_instagram(message):
     else:
         bot.edit_message_text("❌ Не удалось извлечь Reels с Instagram.", message.chat.id, status_msg.message_id)
 
-# --- YOUTUBE SHORTS ---
+# --- YOUTUBE SHORTS (Многоуровневая обработка) ---
+def extract_youtube_id(url):
+    match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
+    return match.group(1) if match else None
+
+def get_youtube_stream_link(video_id):
+    clean_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    # 1. Запрос к Cobalt API
+    try:
+        c_res = requests.post(
+            "https://api.cobalt.tools/",
+            json={"url": clean_url, "videoQuality": "720"},
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            timeout=8
+        )
+        if c_res.status_code == 200:
+            c_data = c_res.json()
+            if c_data.get("url"):
+                return c_data.get("url")
+    except Exception:
+        pass
+
+    # 2. Запрос к Piped API (выбираем видео со звуком)
+    piped_instances = ["https://pipedapi.kavin.rocks", "https://api.piped.yt", "https://pipedapi.mha.fi"]
+    for instance in piped_instances:
+        try:
+            p_res = requests.get(f"{instance}/streams/{video_id}", timeout=6)
+            if p_res.status_code == 200:
+                data = p_res.json()
+                for stream in data.get("videoStreams", []):
+                    if stream.get("videoOnly") is False and "video/mp4" in stream.get("mimeType", ""):
+                        return stream.get("url")
+        except Exception:
+            continue
+
+    # 3. Запрос к шлюзу Invidious
+    invidious_gateways = [
+        f"https://inv.nadeko.net/latest_version?id={video_id}&itag=18",
+        f"https://invidious.nerdvpn.de/latest_version?id={video_id}&itag=18"
+    ]
+    for gw in invidious_gateways:
+        try:
+            h_res = requests.head(gw, timeout=5, allow_redirects=True)
+            if h_res.status_code == 200:
+                return gw
+        except Exception:
+            continue
+
+    return None
+
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
     status_msg = bot.reply_to(message, "⏳ Извлекаю YouTube Shorts...")
     url = message.text.strip()
+    video_id = extract_youtube_id(url)
 
-    # Парсинг через OpenGraph зеркала YouTube (fxyoutube / ddyoutube)
-    direct_url = parse_og_video_url(url, ['fxyoutube.com', 'ddyoutube.com'])
+    if not video_id:
+        bot.edit_message_text("❌ Некорректная ссылка на YouTube Shorts.", message.chat.id, status_msg.message_id)
+        return
 
-    # Резервный метод через Cobalt API
-    if not direct_url:
-        try:
-            payload = {"url": url, "videoQuality": "720"}
-            c_res = requests.post("https://api.cobalt.tools/", json=payload, headers={"Accept": "application/json", "Content-Type": "application/json"}, timeout=10)
-            if c_res.status_code == 200:
-                direct_url = c_res.json().get("url")
-        except Exception:
-            pass
+    direct_url = get_youtube_stream_link(video_id)
 
     if direct_url:
         download_and_send(message, direct_url, status_msg, "✅ YouTube Shorts готово!")
     else:
-        bot.edit_message_text("❌ Не удалось скачать YouTube Shorts. Попробуйте еще раз.", message.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Серверы YouTube временно недоступны. Попробуйте еще раз через полминуты.", message.chat.id, status_msg.message_id)
 
 if __name__ == '__main__':
     threading.Thread(target=run_web).start()
