@@ -27,7 +27,8 @@ apihelper.CUSTOM_REQUEST_TIMEOUT = 300
 TOKEN = '8276557838:AAH_wSAdcAlJwMp8c2wp7y8k0lnhVLePxVA'
 bot = telebot.TeleBot(TOKEN)
 
-MAX_FILE_SIZE = 48 * 1024 * 1024  # Лимит Telegram — 48 МБ
+# Лимит Telegram Bot API на загрузку нового файла — 50 МБ
+MAX_FILE_SIZE = 49 * 1024 * 1024  
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
@@ -42,33 +43,33 @@ def start_cmd(message):
 
 def try_send_from_telegram_preview(message):
     """
-    Пытается мгновенно переотправить видео из предпросмотра (Link Preview),
-    которое Telegram уже закешировал на своих серверах.
+    Если Telegram сгенерировал видео в Link Preview (как на твоём видео),
+    отправляем его мгновенно по file_id без скачивания и без лимитов 50 МБ!
     """
     if hasattr(message, 'web_page') and message.web_page:
         wp = message.web_page
         
-        # 1. Проверяем наличие видео в объекте Link Preview
+        # 1. Проверяем видео в предпросмотре
         if hasattr(wp, 'video') and wp.video:
             try:
                 bot.send_video(
                     message.chat.id,
                     wp.video.file_id,
                     reply_to_message_id=message.message_id,
-                    caption="⚡ Скопировано напрямую из предпросмотра Telegram!"
+                    caption="⚡ Отправлено мгновенно из предпросмотра Telegram!"
                 )
                 return True
             except Exception:
                 pass
 
-        # 2. Проверяем наличие документа/анимации (в редких случаях для Shorts/Reels)
-        if hasattr(wp, 'document') and wp.document and wp.document.mime_type and 'video' in wp.document.mime_type:
+        # 2. Проверяем документ
+        if hasattr(wp, 'document') and wp.document:
             try:
                 bot.send_document(
                     message.chat.id,
                     wp.document.file_id,
                     reply_to_message_id=message.message_id,
-                    caption="⚡ Скопировано напрямую из предпросмотра Telegram!"
+                    caption="⚡ Отправлено мгновенно из предпросмотра Telegram!"
                 )
                 return True
             except Exception:
@@ -76,50 +77,31 @@ def try_send_from_telegram_preview(message):
 
     return False
 
-def download_and_send(message, video_url, status_msg, caption):
-    """Загрузка файла по ссылке и отправка в чат (Резервный вариант)"""
-    temp_dir = tempfile.gettempdir()
-    filename = os.path.join(temp_dir, f"vid_{uuid.uuid4().hex}.mp4")
+def check_and_send_video(message, filename, status_msg, caption):
+    """Проверяет размер файла и отправляет видео"""
+    file_size = os.path.getsize(filename)
+    if file_size > MAX_FILE_SIZE:
+        size_mb = round(file_size / (1024 * 1024), 1)
+        bot.edit_message_text(
+            f"⚠️ Видео слишком большое ({size_mb} МБ). Лимит Telegram Bot API — 50 МБ.", 
+            message.chat.id, 
+            status_msg.message_id
+        )
+        return
 
-    try:
-        bot.edit_message_text("⏳ Скачиваю видеофайл...", message.chat.id, status_msg.message_id)
-        
-        res = requests.get(video_url, headers=HEADERS, stream=True, timeout=90)
-        res.raise_for_status()
-
-        with open(filename, 'wb') as f:
-            for chunk in res.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-
-        file_size = os.path.getsize(filename)
-        if file_size > MAX_FILE_SIZE:
-            size_mb = round(file_size / (1024 * 1024), 1)
-            bot.edit_message_text(f"⚠️ Видео слишком большое ({size_mb} МБ). Лимит Telegram — 50 МБ.", message.chat.id, status_msg.message_id)
-            return
-
-        bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
-        with open(filename, 'rb') as video:
-            bot.send_video(
-                message.chat.id, 
-                video, 
-                reply_to_message_id=message.message_id,
-                caption=caption,
-                timeout=300
-            )
-        bot.delete_message(message.chat.id, status_msg.message_id)
-
-    except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка при отправке: {e}", message.chat.id, status_msg.message_id)
-    finally:
-        if os.path.exists(filename):
-            try:
-                os.remove(filename)
-            except Exception:
-                pass
+    bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
+    with open(filename, 'rb') as video:
+        bot.send_video(
+            message.chat.id, 
+            video, 
+            reply_to_message_id=message.message_id,
+            caption=caption,
+            timeout=300
+        )
+    bot.delete_message(message.chat.id, status_msg.message_id)
 
 def parse_og_video_url(url, mirrors):
-    """Считывание прямой ссылки из OpenGraph метатегов"""
+    """Извлечение прямого .mp4 из OpenGraph метатегов"""
     for mirror in mirrors:
         try:
             target_url = url
@@ -142,61 +124,85 @@ def parse_og_video_url(url, mirrors):
             continue
     return None
 
+def download_file_by_url(video_url, filename):
+    """Скачивание файла по ссылке"""
+    res = requests.get(video_url, headers=HEADERS, stream=True, timeout=90)
+    res.raise_for_status()
+    with open(filename, 'wb') as f:
+        for chunk in res.iter_content(chunk_size=1024 * 1024):
+            if chunk:
+                f.write(chunk)
+    return os.path.exists(filename) and os.path.getsize(filename) > 30000
+
 # --- TIKTOK ---
 @bot.message_handler(func=lambda msg: msg.text and 'tiktok.com' in msg.text)
 def download_tiktok(message):
-    # 1. Попытка забрать видео мгновенно из Link Preview Telegram
     if try_send_from_telegram_preview(message):
         return
 
-    # 2. Если предпросмотра нет, скачиваем резервным путем
-    status_msg = bot.reply_to(message, "⏳ Извлекаю видео из TikTok...")
+    status_msg = bot.reply_to(message, "⏳ Скачиваю видео из TikTok...")
     url = message.text.strip()
+    temp_dir = tempfile.gettempdir()
+    filename = os.path.join(temp_dir, f"tt_{uuid.uuid4().hex}.mp4")
 
-    direct_url = parse_og_video_url(url, ['vxtiktok.com', 'fxtiktok.com'])
+    try:
+        direct_url = parse_og_video_url(url, ['vxtiktok.com', 'fxtiktok.com'])
 
-    if not direct_url:
-        try:
+        if not direct_url:
             res = requests.post("https://www.tikwm.com/api/", data={'url': url, 'hd': 1}, headers=HEADERS, timeout=10).json()
             if res.get('code') == 0:
                 data = res['data']
                 direct_url = data.get('hdplay') or data.get('play')
                 if direct_url and not direct_url.startswith('http'):
                     direct_url = 'https://www.tikwm.com' + direct_url
-        except Exception:
-            pass
 
-    if direct_url:
-        download_and_send(message, direct_url, status_msg, "✅ TikTok видео!")
-    else:
-        bot.edit_message_text("❌ Не удалось получить видео TikTok.", message.chat.id, status_msg.message_id)
+        if direct_url and download_file_by_url(direct_url, filename):
+            check_and_send_video(message, filename, status_msg, "✅ TikTok видео!")
+        else:
+            bot.edit_message_text("❌ Не удалось получить видео TikTok.", message.chat.id, status_msg.message_id)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
+    finally:
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
 
 # --- INSTAGRAM ---
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['instagram.com', 'instagr.am']))
 def download_instagram(message):
-    # 1. Попытка забрать видео мгновенно из Link Preview Telegram
     if try_send_from_telegram_preview(message):
         return
 
-    # 2. Резервный путь
-    status_msg = bot.reply_to(message, "⏳ Извлекаю Instagram Reels...")
+    status_msg = bot.reply_to(message, "⏳ Скачиваю Instagram Reels...")
     url = message.text.strip()
+    temp_dir = tempfile.gettempdir()
+    filename = os.path.join(temp_dir, f"ig_{uuid.uuid4().hex}.mp4")
 
-    direct_url = parse_og_video_url(url, ['ddinstagram.com', 'vxinstagram.com'])
+    try:
+        direct_url = parse_og_video_url(url, ['ddinstagram.com', 'vxinstagram.com'])
 
-    if direct_url:
-        download_and_send(message, direct_url, status_msg, "✅ Instagram Reels!")
-    else:
-        bot.edit_message_text("❌ Не удалось извлечь Reels с Instagram.", message.chat.id, status_msg.message_id)
+        if direct_url and download_file_by_url(direct_url, filename):
+            check_and_send_video(message, filename, status_msg, "✅ Instagram Reels!")
+        else:
+            bot.edit_message_text("❌ Не удалось извлечь Reels с Instagram.", message.chat.id, status_msg.message_id)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
+    finally:
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
 
 # --- YOUTUBE SHORTS ---
 def extract_youtube_id(url):
     match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
     return match.group(1) if match else None
 
-def get_youtube_stream_link(video_id):
+def get_youtube_cobalt_link(video_id):
     clean_url = f"https://www.youtube.com/watch?v={video_id}"
-
     try:
         c_res = requests.post(
             "https://api.cobalt.tools/",
@@ -210,41 +216,16 @@ def get_youtube_stream_link(video_id):
                 return c_data.get("url")
     except Exception:
         pass
-
-    piped_instances = ["https://pipedapi.kavin.rocks", "https://api.piped.yt", "https://pipedapi.mha.fi"]
-    for instance in piped_instances:
-        try:
-            p_res = requests.get(f"{instance}/streams/{video_id}", timeout=6)
-            if p_res.status_code == 200:
-                data = p_res.json()
-                for stream in data.get("videoStreams", []):
-                    if stream.get("videoOnly") is False and "video/mp4" in stream.get("mimeType", ""):
-                        return stream.get("url")
-        except Exception:
-            continue
-
-    invidious_gateways = [
-        f"https://inv.nadeko.net/latest_version?id={video_id}&itag=18",
-        f"https://invidious.nerdvpn.de/latest_version?id={video_id}&itag=18"
-    ]
-    for gw in invidious_gateways:
-        try:
-            h_res = requests.head(gw, timeout=5, allow_redirects=True)
-            if h_res.status_code == 200:
-                return gw
-        except Exception:
-            continue
-
     return None
 
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
-    # 1. Попытка забрать видео мгновенно из Link Preview Telegram
+    # 1. Первым делом пробуем отправку из предпросмотра Telegram
     if try_send_from_telegram_preview(message):
         return
 
-    # 2. Резервный путь
-    status_msg = bot.reply_to(message, "⏳ Извлекаю YouTube Shorts...")
+    # 2. Резервный путь, если предпросмотра не было
+    status_msg = bot.reply_to(message, "⏳ Обрабатываю YouTube Shorts...")
     url = message.text.strip()
     video_id = extract_youtube_id(url)
 
@@ -252,12 +233,24 @@ def download_youtube(message):
         bot.edit_message_text("❌ Некорректная ссылка на YouTube Shorts.", message.chat.id, status_msg.message_id)
         return
 
-    direct_url = get_youtube_stream_link(video_id)
+    temp_dir = tempfile.gettempdir()
+    filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
 
-    if direct_url:
-        download_and_send(message, direct_url, status_msg, "✅ YouTube Shorts готово!")
-    else:
-        bot.edit_message_text("❌ Серверы YouTube временно недоступны. Попробуйте еще раз через полминуты.", message.chat.id, status_msg.message_id)
+    try:
+        direct_url = get_youtube_cobalt_link(video_id)
+        
+        if direct_url and download_file_by_url(direct_url, filename):
+            check_and_send_video(message, filename, status_msg, "✅ YouTube Shorts готово!")
+        else:
+            bot.edit_message_text("❌ Не удалось загрузить видео с YouTube. Попробуйте еще раз.", message.chat.id, status_msg.message_id)
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
+    finally:
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
 
 if __name__ == '__main__':
     threading.Thread(target=run_web).start()
