@@ -34,7 +34,7 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 }
 
-# Кэш отправленных сообщений, чтобы не отправлять дубли
+# Кэш отправленных сообщений, чтобы избегать дубликатов
 processed_messages = set()
 
 @bot.message_handler(commands=['start'])
@@ -46,8 +46,8 @@ def start_cmd(message):
 
 def try_send_from_telegram_preview(message):
     """
-    Проверяет, есть ли в предпросмотре Telegram уже готовый файл видео.
-    Если есть — отправляет мгновенно по file_id без лимитов в 50 МБ!
+    Пытается переотправить видео из закешированного предпросмотра Telegram.
+    Это происходит мгновенно по file_id и обходит лимит в 50 МБ!
     """
     if message.message_id in processed_messages:
         return True
@@ -55,7 +55,7 @@ def try_send_from_telegram_preview(message):
     if hasattr(message, 'web_page') and message.web_page:
         wp = message.web_page
         
-        # 1. Проверяем наличие видео в предпросмотре
+        # 1. Проверяем наличие видеофайла в предпросмотре
         if hasattr(wp, 'video') and wp.video:
             try:
                 bot.send_video(
@@ -69,7 +69,7 @@ def try_send_from_telegram_preview(message):
             except Exception:
                 pass
 
-        # 2. Проверяем документ
+        # 2. Проверяем документ (иногда Telegram кеширует ролики как document)
         if hasattr(wp, 'document') and wp.document:
             try:
                 bot.send_document(
@@ -88,11 +88,11 @@ def try_send_from_telegram_preview(message):
 # --- ОБРАБОТЧИК ОБНОВЛЕНИЯ ПРЕДПРОСМОТРА (EDITED MESSAGE) ---
 @bot.edited_message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be', 'tiktok.com', 'instagram.com', 'instagr.am']))
 def handle_edited_preview(message):
-    """Когда Telegram спустя 1-3 сек догружает предпросмотр в чат"""
+    """Когда Telegram догружает Link Preview с видео спустя пару секунд"""
     try_send_from_telegram_preview(message)
 
 def check_and_send_video(message, filename, status_msg, caption):
-    """Проверяет размер файла и отправляет видео"""
+    """Проверяет размер файла и отправляет его"""
     file_size = os.path.getsize(filename)
     if file_size > MAX_FILE_SIZE:
         size_mb = round(file_size / (1024 * 1024), 1)
@@ -140,7 +140,7 @@ def parse_og_video_url(url, mirrors):
     return None
 
 def download_file_by_url(video_url, filename):
-    """Скачивание файла по ссылке"""
+    """Скачивание файла по внешней ссылке"""
     res = requests.get(video_url, headers=HEADERS, stream=True, timeout=90)
     res.raise_for_status()
     with open(filename, 'wb') as f:
@@ -216,38 +216,46 @@ def extract_youtube_id(url):
     match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
     return match.group(1) if match else None
 
-def get_youtube_cobalt_link(video_id):
-    clean_url = f"https://www.youtube.com/watch?v={video_id}"
+def download_youtube_loader(video_id, filename):
+    """Альтернативная загрузка YouTube через Loader API"""
     try:
-        c_res = requests.post(
-            "https://api.cobalt.tools/",
-            json={"url": clean_url, "videoQuality": "720"},
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
-            timeout=8
-        )
-        if c_res.status_code == 200:
-            c_data = c_res.json()
-            if c_data.get("url"):
-                return c_data.get("url")
+        yt_url = f"https://www.youtube.com/watch?v={video_id}"
+        init_api = f"https://loader.to/ajax/download.php?format=720&url={yt_url}"
+        
+        res = requests.get(init_api, headers=HEADERS, timeout=10)
+        if res.status_code != 200:
+            return False
+            
+        data = res.json()
+        if not data.get('success'):
+            return False
+            
+        task_id = data.get('id')
+        
+        for _ in range(12):
+            time.sleep(2)
+            prog_api = f"https://loader.to/ajax/progress.php?id={task_id}"
+            p_res = requests.get(prog_api, headers=HEADERS, timeout=10)
+            
+            if p_res.status_code == 200:
+                p_data = p_res.json()
+                if p_data.get('success') and p_data.get('download_url'):
+                    dl_url = p_data.get('download_url')
+                    return download_file_by_url(dl_url, filename)
     except Exception:
-        pass
-    return None
+        return False
+    return False
 
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
-    # 1. Сразу пробуем отправить из предпросмотра, если Telegram успел закешировать
-    if try_send_from_telegram_preview(message):
-        return
+    # 1. Ждём до 4 секунд, пока Telegram формирует предпросмотр видео
+    for _ in range(8):
+        if try_send_from_telegram_preview(message):
+            return
+        time.sleep(0.5)
 
-    # 2. Ждем 2.5 секунды, давая шанс Telegram догрузить предпросмотр в чат
-    time.sleep(2.5)
-
-    # Проверяем ещё раз — вдруг предпросмотр пришёл за эти 2.5 секунды
-    if try_send_from_telegram_preview(message):
-        return
-
-    # 3. Если предпросмотр так и не сформировался, скачиваем через резервный сервис
-    status_msg = bot.reply_to(message, "⏳ Обрабатываю YouTube Shorts...")
+    # 2. Если предпросмотр не появился, пробуем загрузить через облачный конвертер
+    status_msg = bot.reply_to(message, "⏳ Предпросмотр не найден, скачиваю с YouTube...")
     url = message.text.strip()
     video_id = extract_youtube_id(url)
 
@@ -259,12 +267,12 @@ def download_youtube(message):
     filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
 
     try:
-        direct_url = get_youtube_cobalt_link(video_id)
+        success = download_youtube_loader(video_id, filename)
         
-        if direct_url and download_file_by_url(direct_url, filename):
+        if success:
             check_and_send_video(message, filename, status_msg, "✅ YouTube Shorts готово!")
         else:
-            bot.edit_message_text("❌ Не удалось загрузить видео с YouTube. Попробуйте еще раз.", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("❌ Ошибка загрузки с YouTube. Попробуйте переотправить ссылку через 5 секунд.", message.chat.id, status_msg.message_id)
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
     finally:
