@@ -8,6 +8,7 @@ import telebot
 from telebot import apihelper
 import requests
 from flask import Flask
+import yt_dlp
 
 # --- Веб-сервер для бесплатного тарифа Render ---
 app = Flask('')
@@ -34,7 +35,6 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 }
 
-# Кэш обработанных сообщений, чтобы не отправлять дубли
 processed_messages = set()
 
 @bot.message_handler(commands=['start'])
@@ -45,52 +45,28 @@ def start_cmd(message):
     )
 
 def try_send_from_telegram_preview(message):
-    """
-    Проверяет предпросмотр Telegram и переотправляет видео мгновенно по file_id.
-    """
+    """Проверка предпросмотра Telegram (для TikTok/Reels, если там есть готовый видеофайл)"""
     if message.message_id in processed_messages:
         return True
 
     if hasattr(message, 'web_page') and message.web_page:
         wp = message.web_page
-        
-        # 1. Проверяем наличие видео в предпросмотре
         if hasattr(wp, 'video') and wp.video:
             try:
                 bot.send_video(
                     message.chat.id,
                     wp.video.file_id,
                     reply_to_message_id=message.message_id,
-                    caption="⚡ Отправлено мгновенно из предпросмотра Telegram!"
+                    caption="⚡ Отправлено из предпросмотра Telegram!"
                 )
                 processed_messages.add(message.message_id)
                 return True
             except Exception:
                 pass
-
-        # 2. Проверяем документ
-        if hasattr(wp, 'document') and wp.document:
-            try:
-                bot.send_document(
-                    message.chat.id,
-                    wp.document.file_id,
-                    reply_to_message_id=message.message_id,
-                    caption="⚡ Отправлено мгновенно из предпросмотра Telegram!"
-                )
-                processed_messages.add(message.message_id)
-                return True
-            except Exception:
-                pass
-
     return False
 
-# --- ОБРАБОТКА ОБНОВЛЕНИЯ ПРЕДПРОСМОТРА (Когда Telegram генерирует Link Preview спустя 1-3 сек) ---
-@bot.edited_message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be', 'tiktok.com', 'instagram.com', 'instagr.am']))
-def handle_edited_preview(message):
-    try_send_from_telegram_preview(message)
-
 def check_and_send_video(message, filename, status_msg, caption):
-    """Проверяет размер файла и отправляет видео"""
+    """Проверяет размер и отправляет видео"""
     file_size = os.path.getsize(filename)
     if file_size > MAX_FILE_SIZE:
         size_mb = round(file_size / (1024 * 1024), 1)
@@ -114,7 +90,6 @@ def check_and_send_video(message, filename, status_msg, caption):
     processed_messages.add(message.message_id)
 
 def parse_og_video_url(url, mirrors):
-    """Извлечение прямого .mp4 из OpenGraph метатегов"""
     for mirror in mirrors:
         try:
             target_url = url
@@ -138,7 +113,6 @@ def parse_og_video_url(url, mirrors):
     return None
 
 def download_file_by_url(video_url, filename):
-    """Скачивание файла по ссылке"""
     res = requests.get(video_url, headers=HEADERS, stream=True, timeout=90)
     res.raise_for_status()
     with open(filename, 'wb') as f:
@@ -209,73 +183,35 @@ def download_instagram(message):
             except Exception:
                 pass
 
-# --- YOUTUBE SHORTS ---
-def extract_youtube_id(url):
-    match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
-    return match.group(1) if match else None
-
-def download_youtube_loader(video_id, filename):
-    """Загрузка YouTube через Loader API"""
-    try:
-        yt_url = f"https://www.youtube.com/watch?v={video_id}"
-        init_api = f"https://loader.to/ajax/download.php?format=720&url={yt_url}"
-        
-        res = requests.get(init_api, headers=HEADERS, timeout=10)
-        if res.status_code != 200:
-            return False
-            
-        data = res.json()
-        if not data.get('success'):
-            return False
-            
-        task_id = data.get('id')
-        
-        for _ in range(10):
-            time.sleep(2)
-            prog_api = f"https://loader.to/ajax/progress.php?id={task_id}"
-            p_res = requests.get(prog_api, headers=HEADERS, timeout=10)
-            
-            if p_res.status_code == 200:
-                p_data = p_res.json()
-                if p_data.get('success') and p_data.get('download_url'):
-                    dl_url = p_data.get('download_url')
-                    return download_file_by_url(dl_url, filename)
-    except Exception:
-        return False
-    return False
+# --- YOUTUBE SHORTS (Через yt-dlp) ---
+def download_youtube_ytdlp(url, output_path):
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': output_path,
+        'quiet': True,
+        'no_warnings': True,
+        'socket_timeout': 30,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    return os.path.exists(output_path) and os.path.getsize(output_path) > 30000
 
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
-    # 1. Проверяем предпросмотр сразу
-    if try_send_from_telegram_preview(message):
-        return
-
-    # 2. Ждем 3 секунды: если предпросмотр подгрузится, сработает handle_edited_preview
-    time.sleep(3)
-    if message.message_id in processed_messages:
-        return
-
-    # 3. Если предпросмотра не было, пробуем скачивание через сервис
-    status_msg = bot.reply_to(message, "⏳ Обрабатываю YouTube Shorts...")
+    status_msg = bot.reply_to(message, "⏳ Загружаю YouTube Shorts...")
     url = message.text.strip()
-    video_id = extract_youtube_id(url)
-
-    if not video_id:
-        bot.edit_message_text("❌ Некорректная ссылка на YouTube Shorts.", message.chat.id, status_msg.message_id)
-        return
 
     temp_dir = tempfile.gettempdir()
     filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
 
     try:
-        success = download_youtube_loader(video_id, filename)
-        
+        success = download_youtube_ytdlp(url, filename)
         if success:
             check_and_send_video(message, filename, status_msg, "✅ YouTube Shorts готово!")
         else:
-            bot.edit_message_text("❌ Не удалось загрузить видео с YouTube. Попробуйте еще раз через 5 секунд.", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("❌ Не удалось скачать видео с YouTube.", message.chat.id, status_msg.message_id)
     except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
+        bot.edit_message_text(f"❌ Ошибка скачивания YouTube: {e}", message.chat.id, status_msg.message_id)
     finally:
         if os.path.exists(filename):
             try:
