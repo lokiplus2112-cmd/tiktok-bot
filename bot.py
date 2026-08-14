@@ -170,58 +170,28 @@ def download_instagram(message):
                 pass
 
 # --- ОБРАБОТКА YOUTUBE SHORTS ---
-def extract_youtube_id(url):
-    match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
-    return match.group(1) if match else None
-
-def download_youtube_invidious(video_id, filename):
-    """Скачивание через публичные зеркала Invidious (обход блокировок IP)"""
-    instances = [
-        "https://inv.nadeko.net",
-        "https://invidious.nerdvpn.de",
-        "https://invidious.drgns.space",
-        "https://invidious.flokinet.to",
-        "https://invidious.privacydev.net"
-    ]
-    for instance in instances:
-        try:
-            api_url = f"{instance}/api/v1/videos/{video_id}"
-            res = requests.get(api_url, headers=HEADERS, timeout=7)
-            if res.status_code == 200:
-                data = res.json()
-                format_streams = data.get('formatStreams', [])
-                if format_streams:
-                    # Берем лучшее готовое видео со звуком
-                    stream_url = format_streams[0].get('url')
-                    if stream_url:
-                        v_res = requests.get(stream_url, headers=HEADERS, stream=True, timeout=60)
-                        if v_res.status_code == 200:
-                            with open(filename, 'wb') as f:
-                                for chunk in v_res.iter_content(chunk_size=1024 * 1024):
-                                    if chunk:
-                                        f.write(chunk)
-                            if os.path.exists(filename) and os.path.getsize(filename) > 10000:
-                                return True
-        except Exception:
-            continue
-    return False
+def clean_youtube_url(raw_url):
+    match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', raw_url)
+    if match:
+        return f"https://www.youtube.com/watch?v={match.group(1)}"
+    return raw_url
 
 def download_youtube_cobalt(url, filename):
-    """Скачивание через Cobalt API"""
+    clean_url = clean_youtube_url(url)
     instances = [
         "https://api.cobalt.tools",
-        "https://cobalt.stream",
-        "https://co.wuk.sh"
+        "https://cobalt-api.kwippy.com",
+        "https://cobalt.stream"
     ]
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json"
     }
-    data = {"url": url}
+    data = {"url": clean_url}
     
     for api_endpoint in instances:
         try:
-            res = requests.post(f"{api_endpoint}/", json=data, headers=headers, timeout=8)
+            res = requests.post(f"{api_endpoint}/", json=data, headers=headers, timeout=10)
             if res.status_code == 200:
                 res_data = res.json()
                 video_link = res_data.get("url")
@@ -250,17 +220,12 @@ def download_youtube(message):
         download_success = False
         bot.edit_message_text("⏳ Скачиваю YouTube Shorts...", message.chat.id, status_msg.message_id)
 
-        # 1. Попытка через Invidious API
-        video_id = extract_youtube_id(url)
-        if video_id:
-            download_success = download_youtube_invidious(video_id, filename)
+        # 1. Попытка через Cobalt API
+        download_success = download_youtube_cobalt(url, filename)
 
-        # 2. Попытка через Cobalt API
+        # 2. Резервная попытка через yt-dlp
         if not download_success:
-            download_success = download_youtube_cobalt(url, filename)
-
-        # 3. Попытка через yt-dlp
-        if not download_success:
+            clean_url = clean_youtube_url(url)
             ydl_opts = {
                 'format': 'best[ext=mp4]/best',
                 'outtmpl': filename,
@@ -268,13 +233,13 @@ def download_youtube(message):
                 'no_warnings': True,
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android', 'tvhtml5']
+                        'player_client': ['android', 'ios', 'mweb']
                     }
                 }
             }
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
+                    ydl.download([clean_url])
                 if os.path.exists(filename) and os.path.getsize(filename) > 10000:
                     download_success = True
             except Exception:
@@ -292,7 +257,7 @@ def download_youtube(message):
                 )
             bot.delete_message(message.chat.id, status_msg.message_id)
         else:
-            bot.edit_message_text("❌ Не удалось скачать видео с YouTube. Попробуйте еще раз или другую ссылку.", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("❌ Не удалось скачать видео с YouTube. Попробуйте еще раз.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка при скачивании: {e}", message.chat.id, status_msg.message_id)
