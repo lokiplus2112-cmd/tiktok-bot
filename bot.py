@@ -28,6 +28,8 @@ apihelper.CUSTOM_REQUEST_TIMEOUT = 300
 TOKEN = '8276557838:AAH_wSAdcAlJwMp8c2wp7y8k0lnhVLePxVA'
 bot = telebot.TeleBot(TOKEN)
 
+MAX_FILE_SIZE = 48 * 1024 * 1024  # Ограничение Telegram в 48 МБ (запас от 50 МБ)
+
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 }
@@ -38,6 +40,31 @@ def start_cmd(message):
         message, 
         "👋 Привет! Отправь мне ссылку на видео из **TikTok**, **Instagram (Reels)** или **YouTube (Shorts)**!"
     )
+
+def check_and_send_video(message, filename, status_msg, caption):
+    """Проверка размера файла перед отправкой в Telegram"""
+    file_size = os.path.getsize(filename)
+    
+    if file_size > MAX_FILE_SIZE:
+        size_mb = round(file_size / (1024 * 1024), 1)
+        bot.edit_message_text(
+            f"⚠️ Видео слишком большое ({size_mb} МБ).\n"
+            f"Telegram запрещает ботам отправлять файлы больше 50 МБ.", 
+            message.chat.id, 
+            status_msg.message_id
+        )
+        return
+
+    bot.edit_message_text("📤 Отправляю видео в чат...", message.chat.id, status_msg.message_id)
+    with open(filename, 'rb') as video:
+        bot.send_video(
+            message.chat.id, 
+            video, 
+            reply_to_message_id=message.message_id,
+            caption=caption,
+            timeout=300
+        )
+    bot.delete_message(message.chat.id, status_msg.message_id)
 
 # --- TIKTOK ---
 @bot.message_handler(func=lambda msg: msg.text and 'tiktok.com' in msg.text)
@@ -68,17 +95,7 @@ def download_tiktok(message):
                     if chunk:
                         f.write(chunk)
             
-            bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
-            
-            with open(filename, 'rb') as video:
-                bot.send_video(
-                    message.chat.id, 
-                    video, 
-                    reply_to_message_id=message.message_id,
-                    caption="✅ TikTok видео!",
-                    timeout=300
-                )
-            bot.delete_message(message.chat.id, status_msg.message_id)
+            check_and_send_video(message, filename, status_msg, "✅ TikTok видео!")
         else:
             bot.edit_message_text("❌ Ошибка загрузки TikTok.", message.chat.id, status_msg.message_id)
 
@@ -132,16 +149,7 @@ def download_instagram(message):
                 download_success = False
 
         if download_success:
-            bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
-            with open(filename, 'rb') as video:
-                bot.send_video(
-                    message.chat.id, 
-                    video, 
-                    reply_to_message_id=message.message_id,
-                    caption="✅ Instagram Reels!",
-                    timeout=300
-                )
-            bot.delete_message(message.chat.id, status_msg.message_id)
+            check_and_send_video(message, filename, status_msg, "✅ Instagram Reels!")
         else:
             bot.edit_message_text("❌ Не удалось скачать видео с Instagram.", message.chat.id, status_msg.message_id)
 
@@ -160,10 +168,10 @@ def extract_youtube_id(url):
     return match.group(1) if match else None
 
 def download_youtube_loader(video_id, filename):
-    """Облачное скачивание через Loader API (обход бана IP Render)"""
     try:
         yt_url = f"https://www.youtube.com/watch?v={video_id}"
-        init_api = f"https://loader.to/ajax/download.php?format=1080&url={yt_url}"
+        # Использование формата 720p для оптиматизации размера под лимит 50 МБ
+        init_api = f"https://loader.to/ajax/download.php?format=720&url={yt_url}"
         
         res = requests.get(init_api, headers=HEADERS, timeout=10)
         if res.status_code != 200:
@@ -175,8 +183,7 @@ def download_youtube_loader(video_id, filename):
             
         task_id = data.get('id')
         
-        # Ожидание обработки видео на внешнем сервере
-        for _ in range(12):
+        for _ in range(15):
             time.sleep(2)
             prog_api = f"https://loader.to/ajax/progress.php?id={task_id}"
             p_res = requests.get(prog_api, headers=HEADERS, timeout=10)
@@ -186,7 +193,6 @@ def download_youtube_loader(video_id, filename):
                 if p_data.get('success') and p_data.get('download_url'):
                     dl_url = p_data.get('download_url')
                     
-                    # Скачивание готового MP4
                     video_res = requests.get(dl_url, headers=HEADERS, stream=True, timeout=90)
                     if video_res.status_code == 200:
                         with open(filename, 'wb') as f:
@@ -212,24 +218,14 @@ def download_youtube(message):
     filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
     
     try:
-        bot.edit_message_text("⏳ Скачиваю YouTube Shorts через облачный сервис...", message.chat.id, status_msg.message_id)
+        bot.edit_message_text("⏳ Обрабатываю YouTube Shorts (720p)...", message.chat.id, status_msg.message_id)
 
-        # Скачивание
         download_success = download_youtube_loader(video_id, filename)
 
         if download_success:
-            bot.edit_message_text("📤 Отправляю видео в чат...", message.chat.id, status_msg.message_id)
-            with open(filename, 'rb') as video:
-                bot.send_video(
-                    message.chat.id, 
-                    video, 
-                    reply_to_message_id=message.message_id,
-                    caption="✅ YouTube Shorts готово!",
-                    timeout=300
-                )
-            bot.delete_message(message.chat.id, status_msg.message_id)
+            check_and_send_video(message, filename, status_msg, "✅ YouTube Shorts готово!")
         else:
-            bot.edit_message_text("❌ Сервер обработки YouTube сейчас перегружен. Попробуйте еще раз через минуту.", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("❌ Сервер обработки перегружен. Попробуйте еще раз через полминуты.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
