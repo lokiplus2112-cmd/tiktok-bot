@@ -1,64 +1,100 @@
 import os
+import tempfile
+import uuid
+import threading
 import telebot
-import yt_dlp
+from telebot import apihelper
+import requests
+from flask import Flask
 
-# ⚠️ Вставьте ваш токен от BotFather между кавычками ниже:
+# --- Веб-сервер для работы на бесплатном тарифе Render ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+# --------------------------------------------------------
+
+apihelper.CONNECT_TIMEOUT = 300
+apihelper.READ_TIMEOUT = 300
+apihelper.CUSTOM_REQUEST_TIMEOUT = 300
+
 TOKEN = '8276557838:AAH_wSAdcAlJwMp8c2wp7y8k0lnhVLePxVA'
-
 bot = telebot.TeleBot(TOKEN)
 
-# Реакция на команду /start
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     bot.reply_to(
         message, 
-        "👋 Привет! Отправь мне ссылку на видео из TikTok, и я скачаю его для тебя."
+        "👋 Привет! Отправь мне ссылку на видео из TikTok, и я скачаю его в оригинальном качестве!"
     )
 
-# Реакция на ссылку с tiktok.com
 @bot.message_handler(func=lambda msg: msg.text and 'tiktok.com' in msg.text)
 def download_tiktok(message):
-    status_msg = bot.reply_to(message, "⏳ Скачиваю видео, подождите...")
+    status_msg = bot.reply_to(message, "⏳ Получаю оригинальное видео...")
     url = message.text.strip()
-    file_path = f"video_{message.chat.id}.mp4"
-
-    # Настройки для скачивания через yt-dlp
-    ydl_opts = {
-        'outtmpl': file_path,
-        'format': 'best',
-        'quiet': True,
-    }
-
+    
+    temp_dir = tempfile.gettempdir()
+    filename = os.path.join(temp_dir, f"tt_{uuid.uuid4().hex}.mp4")
+    
     try:
-        # Скачиваем файл с TikTok
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        api_url = "https://www.tikwm.com/api/"
+        response = requests.post(api_url, data={'url': url}, headers=HEADERS, timeout=15).json()
 
-        # Отправляем файл пользователю
-        with open(file_path, 'rb') as video:
-            bot.send_video(
+        if response.get('code') == 0:
+            video_url = response['data']['play']
+            
+            bot.edit_message_text("⏳ Скачиваю файл...", message.chat.id, status_msg.message_id)
+            
+            res = requests.get(video_url, headers=HEADERS, stream=True, timeout=60)
+            res.raise_for_status()
+            with open(filename, 'wb') as f:
+                for chunk in res.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+            
+            bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
+            
+            with open(filename, 'rb') as video:
+                bot.send_video(
+                    message.chat.id, 
+                    video, 
+                    reply_to_message_id=message.message_id,
+                    caption="✅ Оригинальное видео готово!",
+                    timeout=300
+                )
+            bot.delete_message(message.chat.id, status_msg.message_id)
+        else:
+            bot.edit_message_text(
+                "❌ Не удалось найти видео по этой ссылке.", 
                 message.chat.id, 
-                video, 
-                reply_to_message_id=message.message_id,
-                caption="✅ Ваше видео готово!"
+                status_msg.message_id
             )
-
-        # Удаляем временное сообщение "Скачиваю..."
-        bot.delete_message(message.chat.id, status_msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(
-            f"❌ Не удалось скачать видео.\nОшибка: {e}", 
+            f"❌ Ошибка: {e}", 
             message.chat.id, 
             status_msg.message_id
         )
-
     finally:
-        # Удаляем скачанный файл с компьютера, чтобы не засорять память
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
 
-# Запуск работы бота
 if __name__ == '__main__':
-    print("🚀 Бот успешно запущен!")
+    # Запуск веб-сервера в фоновом потоке
+    threading.Thread(target=run_web).start()
+    
+    print("🚀 Бот запущен на Render!")
     bot.infinity_polling()
