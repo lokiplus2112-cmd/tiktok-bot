@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import tempfile
 import uuid
 import threading
@@ -27,12 +28,14 @@ apihelper.CUSTOM_REQUEST_TIMEOUT = 300
 TOKEN = '8276557838:AAH_wSAdcAlJwMp8c2wp7y8k0lnhVLePxVA'
 bot = telebot.TeleBot(TOKEN)
 
-# Лимит Telegram Bot API на загрузку нового файла — 50 МБ
-MAX_FILE_SIZE = 49 * 1024 * 1024  
+MAX_FILE_SIZE = 49 * 1024 * 1024  # Лимит Telegram Bot API — 49 МБ
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 }
+
+# Кэш отправленных сообщений, чтобы не отправлять дубли
+processed_messages = set()
 
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
@@ -43,13 +46,16 @@ def start_cmd(message):
 
 def try_send_from_telegram_preview(message):
     """
-    Если Telegram сгенерировал видео в Link Preview (как на твоём видео),
-    отправляем его мгновенно по file_id без скачивания и без лимитов 50 МБ!
+    Проверяет, есть ли в предпросмотре Telegram уже готовый файл видео.
+    Если есть — отправляет мгновенно по file_id без лимитов в 50 МБ!
     """
+    if message.message_id in processed_messages:
+        return True
+
     if hasattr(message, 'web_page') and message.web_page:
         wp = message.web_page
         
-        # 1. Проверяем видео в предпросмотре
+        # 1. Проверяем наличие видео в предпросмотре
         if hasattr(wp, 'video') and wp.video:
             try:
                 bot.send_video(
@@ -58,6 +64,7 @@ def try_send_from_telegram_preview(message):
                     reply_to_message_id=message.message_id,
                     caption="⚡ Отправлено мгновенно из предпросмотра Telegram!"
                 )
+                processed_messages.add(message.message_id)
                 return True
             except Exception:
                 pass
@@ -71,11 +78,18 @@ def try_send_from_telegram_preview(message):
                     reply_to_message_id=message.message_id,
                     caption="⚡ Отправлено мгновенно из предпросмотра Telegram!"
                 )
+                processed_messages.add(message.message_id)
                 return True
             except Exception:
                 pass
 
     return False
+
+# --- ОБРАБОТЧИК ОБНОВЛЕНИЯ ПРЕДПРОСМОТРА (EDITED MESSAGE) ---
+@bot.edited_message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be', 'tiktok.com', 'instagram.com', 'instagr.am']))
+def handle_edited_preview(message):
+    """Когда Telegram спустя 1-3 сек догружает предпросмотр в чат"""
+    try_send_from_telegram_preview(message)
 
 def check_and_send_video(message, filename, status_msg, caption):
     """Проверяет размер файла и отправляет видео"""
@@ -99,6 +113,7 @@ def check_and_send_video(message, filename, status_msg, caption):
             timeout=300
         )
     bot.delete_message(message.chat.id, status_msg.message_id)
+    processed_messages.add(message.message_id)
 
 def parse_og_video_url(url, mirrors):
     """Извлечение прямого .mp4 из OpenGraph метатегов"""
@@ -220,11 +235,18 @@ def get_youtube_cobalt_link(video_id):
 
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
-    # 1. Первым делом пробуем отправку из предпросмотра Telegram
+    # 1. Сразу пробуем отправить из предпросмотра, если Telegram успел закешировать
     if try_send_from_telegram_preview(message):
         return
 
-    # 2. Резервный путь, если предпросмотра не было
+    # 2. Ждем 2.5 секунды, давая шанс Telegram догрузить предпросмотр в чат
+    time.sleep(2.5)
+
+    # Проверяем ещё раз — вдруг предпросмотр пришёл за эти 2.5 секунды
+    if try_send_from_telegram_preview(message):
+        return
+
+    # 3. Если предпросмотр так и не сформировался, скачиваем через резервный сервис
     status_msg = bot.reply_to(message, "⏳ Обрабатываю YouTube Shorts...")
     url = message.text.strip()
     video_id = extract_youtube_id(url)
