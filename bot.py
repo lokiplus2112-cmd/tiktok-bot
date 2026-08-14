@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import tempfile
 import uuid
 import threading
@@ -7,7 +8,6 @@ import telebot
 from telebot import apihelper
 import requests
 from flask import Flask
-import yt_dlp
 
 # --- Веб-сервер для бесплатного тарифа Render ---
 app = Flask('')
@@ -29,7 +29,7 @@ TOKEN = '8276557838:AAH_wSAdcAlJwMp8c2wp7y8k0lnhVLePxVA'
 bot = telebot.TeleBot(TOKEN)
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 }
 
 @bot.message_handler(commands=['start'])
@@ -159,27 +159,43 @@ def extract_youtube_id(url):
     match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
     return match.group(1) if match else None
 
-def download_youtube_via_proxy(video_id, filename):
-    # Используем внешние медиа-сервера, которые не забанены в Google
-    gateways = [
-        f"https://invidious.nerdvpn.de/latest_version?id={video_id}&itag=22",
-        f"https://inv.nadeko.net/latest_version?id={video_id}&itag=22",
-        f"https://invidious.drgns.space/latest_version?id={video_id}&itag=22",
-        f"https://inv.nadeko.net/latest_version?id={video_id}&itag=18"
-    ]
-    
-    for stream_url in gateways:
-        try:
-            res = requests.get(stream_url, headers=HEADERS, stream=True, timeout=30, allow_redirects=True)
-            if res.status_code == 200 and int(res.headers.get('Content-Length', 0)) > 50000:
-                with open(filename, 'wb') as f:
-                    for chunk in res.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
-                if os.path.exists(filename) and os.path.getsize(filename) > 50000:
-                    return True
-        except Exception:
-            continue
+def download_youtube_loader(video_id, filename):
+    """Облачное скачивание через Loader API (обход бана IP Render)"""
+    try:
+        yt_url = f"https://www.youtube.com/watch?v={video_id}"
+        init_api = f"https://loader.to/ajax/download.php?format=1080&url={yt_url}"
+        
+        res = requests.get(init_api, headers=HEADERS, timeout=10)
+        if res.status_code != 200:
+            return False
+            
+        data = res.json()
+        if not data.get('success'):
+            return False
+            
+        task_id = data.get('id')
+        
+        # Ожидание обработки видео на внешнем сервере
+        for _ in range(12):
+            time.sleep(2)
+            prog_api = f"https://loader.to/ajax/progress.php?id={task_id}"
+            p_res = requests.get(prog_api, headers=HEADERS, timeout=10)
+            
+            if p_res.status_code == 200:
+                p_data = p_res.json()
+                if p_data.get('success') and p_data.get('download_url'):
+                    dl_url = p_data.get('download_url')
+                    
+                    # Скачивание готового MP4
+                    video_res = requests.get(dl_url, headers=HEADERS, stream=True, timeout=90)
+                    if video_res.status_code == 200:
+                        with open(filename, 'wb') as f:
+                            for chunk in video_res.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    f.write(chunk)
+                        return os.path.exists(filename) and os.path.getsize(filename) > 30000
+    except Exception:
+        return False
     return False
 
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
@@ -189,40 +205,20 @@ def download_youtube(message):
     video_id = extract_youtube_id(raw_url)
     
     if not video_id:
-        bot.edit_message_text("❌ Неверная ссылка на YouTube.", message.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Некорректная ссылка на YouTube Shorts.", message.chat.id, status_msg.message_id)
         return
 
     temp_dir = tempfile.gettempdir()
     filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
     
     try:
-        bot.edit_message_text("⏳ Скачиваю YouTube Shorts...", message.chat.id, status_msg.message_id)
+        bot.edit_message_text("⏳ Скачиваю YouTube Shorts через облачный сервис...", message.chat.id, status_msg.message_id)
 
-        # 1. Загрузка через шлюз напрямую
-        download_success = download_youtube_via_proxy(video_id, filename)
-
-        # 2. Резервный метод через Cobalt API
-        if not download_success:
-            try:
-                payload = {"url": f"https://www.youtube.com/watch?v={video_id}"}
-                headers = {"Accept": "application/json", "Content-Type": "application/json"}
-                c_res = requests.post("https://api.cobalt.tools/", json=payload, headers=headers, timeout=10)
-                if c_res.status_code == 200:
-                    dl_link = c_res.json().get("url")
-                    if dl_link:
-                        v_res = requests.get(dl_link, headers=HEADERS, stream=True, timeout=60)
-                        if v_res.status_code == 200:
-                            with open(filename, 'wb') as f:
-                                for chunk in v_res.iter_content(chunk_size=1024 * 1024):
-                                    if chunk:
-                                        f.write(chunk)
-                            if os.path.exists(filename) and os.path.getsize(filename) > 50000:
-                                download_success = True
-            except Exception:
-                pass
+        # Скачивание
+        download_success = download_youtube_loader(video_id, filename)
 
         if download_success:
-            bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("📤 Отправляю видео в чат...", message.chat.id, status_msg.message_id)
             with open(filename, 'rb') as video:
                 bot.send_video(
                     message.chat.id, 
@@ -233,10 +229,10 @@ def download_youtube(message):
                 )
             bot.delete_message(message.chat.id, status_msg.message_id)
         else:
-            bot.edit_message_text("❌ Не удалось скачать видео. Попробуйте еще раз через несколько секунд.", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("❌ Сервер обработки YouTube сейчас перегружен. Попробуйте еще раз через минуту.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка скачивания: {e}", message.chat.id, status_msg.message_id)
+        bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
     finally:
         if os.path.exists(filename):
             try:
