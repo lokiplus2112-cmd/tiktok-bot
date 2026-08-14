@@ -36,10 +36,10 @@ HEADERS = {
 def start_cmd(message):
     bot.reply_to(
         message, 
-        "👋 Привет! Отправь мне ссылку на видео из **TikTok**, **Instagram (Reels)** или **YouTube (Shorts)**, и я скачаю его для тебя!"
+        "👋 Привет! Отправь мне ссылку на видео из **TikTok**, **Instagram (Reels)** или **YouTube (Shorts)**, и я скачаю его!"
     )
 
-# --- ОБРАБОТКА TIKTOK ---
+# --- TIKTOK ---
 @bot.message_handler(func=lambda msg: msg.text and 'tiktok.com' in msg.text)
 def download_tiktok(message):
     status_msg = bot.reply_to(message, "⏳ Получаю HD видео из TikTok...")
@@ -80,7 +80,7 @@ def download_tiktok(message):
                 )
             bot.delete_message(message.chat.id, status_msg.message_id)
         else:
-            bot.edit_message_text("❌ Не удалось найти TikTok видео по этой ссылке.", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("❌ Не удалось найти TikTok видео.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
@@ -91,7 +91,7 @@ def download_tiktok(message):
             except Exception:
                 pass
 
-# --- ОБРАБОТКА INSTAGRAM ---
+# --- INSTAGRAM ---
 def get_instagram_direct_url(url):
     for mirror in ['ddinstagram.com', 'vxinstagram.com']:
         try:
@@ -169,29 +169,68 @@ def download_instagram(message):
             except Exception:
                 pass
 
-# --- ОБРАБОТКА YOUTUBE SHORTS ---
-def clean_youtube_url(raw_url):
-    match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', raw_url)
-    if match:
-        return f"https://www.youtube.com/watch?v={match.group(1)}"
-    return raw_url
+# --- YOUTUBE SHORTS ---
+def extract_youtube_id(url):
+    match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
+    return match.group(1) if match else None
+
+def download_youtube_piped(video_id, filename):
+    instances = [
+        "https://pipedapi.kavin.rocks",
+        "https://api.piped.yt",
+        "https://pipedapi.mha.fi",
+        "https://piped-api.garudalinux.org",
+        "https://pipedapi.adminforge.de"
+    ]
+    for instance in instances:
+        try:
+            res = requests.get(f"{instance}/streams/{video_id}", headers=HEADERS, timeout=8)
+            if res.status_code == 200:
+                data = res.json()
+                video_streams = data.get("videoStreams", [])
+                stream_url = None
+                
+                # Поиск прямого mp4 видео со звуком
+                for s in video_streams:
+                    if s.get("videoOnly") is False and "video/mp4" in s.get("mimeType", ""):
+                        stream_url = s.get("url")
+                        break
+                
+                # Если со звуком в одном потоке нет, ищем любой видеопоток mp4
+                if not stream_url:
+                    for s in video_streams:
+                        if "video/mp4" in s.get("mimeType", ""):
+                            stream_url = s.get("url")
+                            break
+
+                if stream_url:
+                    v_res = requests.get(stream_url, headers=HEADERS, stream=True, timeout=60)
+                    if v_res.status_code == 200:
+                        with open(filename, 'wb') as f:
+                            for chunk in v_res.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    f.write(chunk)
+                        if os.path.exists(filename) and os.path.getsize(filename) > 10000:
+                            return True
+        except Exception:
+            continue
+    return False
 
 def download_youtube_cobalt(url, filename):
-    clean_url = clean_youtube_url(url)
+    clean_url = f"https://www.youtube.com/watch?v={extract_youtube_id(url)}" if extract_youtube_id(url) else url
     instances = [
         "https://api.cobalt.tools",
-        "https://cobalt-api.kwippy.com",
-        "https://cobalt.stream"
+        "https://cobalt.stream",
+        "https://co.wuk.sh"
     ]
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json"
     }
     data = {"url": clean_url}
-    
     for api_endpoint in instances:
         try:
-            res = requests.post(f"{api_endpoint}/", json=data, headers=headers, timeout=10)
+            res = requests.post(f"{api_endpoint}/", json=data, headers=headers, timeout=8)
             if res.status_code == 200:
                 res_data = res.json()
                 video_link = res_data.get("url")
@@ -218,14 +257,21 @@ def download_youtube(message):
     
     try:
         download_success = False
+        video_id = extract_youtube_id(url)
+
         bot.edit_message_text("⏳ Скачиваю YouTube Shorts...", message.chat.id, status_msg.message_id)
 
-        # 1. Попытка через Cobalt API
-        download_success = download_youtube_cobalt(url, filename)
+        # 1. Попытка через Piped API (наиболее надежно)
+        if video_id:
+            download_success = download_youtube_piped(video_id, filename)
 
-        # 2. Резервная попытка через yt-dlp
+        # 2. Попытка через Cobalt API
         if not download_success:
-            clean_url = clean_youtube_url(url)
+            download_success = download_youtube_cobalt(url, filename)
+
+        # 3. Резерв через yt-dlp
+        if not download_success:
+            clean_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else url
             ydl_opts = {
                 'format': 'best[ext=mp4]/best',
                 'outtmpl': filename,
@@ -233,7 +279,7 @@ def download_youtube(message):
                 'no_warnings': True,
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android', 'ios', 'mweb']
+                        'player_client': ['android', 'ios', 'web']
                     }
                 }
             }
@@ -270,5 +316,5 @@ def download_youtube(message):
 
 if __name__ == '__main__':
     threading.Thread(target=run_web).start()
-    print("🚀 Бот запущен! Поддерживает TikTok, Instagram и YouTube Shorts.")
+    print("🚀 Бот запущен!")
     bot.infinity_polling()
