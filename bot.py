@@ -40,32 +40,44 @@ def start_cmd(message):
         "👋 Привет! Отправь мне ссылку на видео из **TikTok**, **Instagram (Reels)** или **YouTube (Shorts)**!"
     )
 
-def parse_og_video_url(url, mirrors):
-    """Считывание прямой ссылки из OpenGraph метатегов (для TikTok и Instagram)"""
-    for mirror in mirrors:
-        try:
-            target_url = url
-            if 'instagram.com' in url or 'instagr.am' in url:
-                target_url = re.sub(r'https?://(www\.)?instagr(\.am|am\.com)', f'https://{mirror}', url)
-            elif 'tiktok.com' in url:
-                target_url = re.sub(r'https?://(www\.|vm\.|vt\.)?tiktok\.com', f'https://{mirror}', url)
+def try_send_from_telegram_preview(message):
+    """
+    Пытается мгновенно переотправить видео из предпросмотра (Link Preview),
+    которое Telegram уже закешировал на своих серверах.
+    """
+    if hasattr(message, 'web_page') and message.web_page:
+        wp = message.web_page
+        
+        # 1. Проверяем наличие видео в объекте Link Preview
+        if hasattr(wp, 'video') and wp.video:
+            try:
+                bot.send_video(
+                    message.chat.id,
+                    wp.video.file_id,
+                    reply_to_message_id=message.message_id,
+                    caption="⚡ Скопировано напрямую из предпросмотра Telegram!"
+                )
+                return True
+            except Exception:
+                pass
 
-            res = requests.get(target_url, headers=HEADERS, timeout=10, allow_redirects=True)
-            if res.status_code == 200:
-                match = re.search(r'property=["\']og:video(?::secure_url)?["\']\s+content=["\']([^"\']+)["\']', res.text, re.IGNORECASE)
-                if not match:
-                    match = re.search(r'content=["\']([^"\']+\.mp4[^"\']*)["\']', res.text, re.IGNORECASE)
-                
-                if match:
-                    direct_url = match.group(1).replace('&amp;', '&')
-                    if direct_url.startswith('http'):
-                        return direct_url
-        except Exception:
-            continue
-    return None
+        # 2. Проверяем наличие документа/анимации (в редких случаях для Shorts/Reels)
+        if hasattr(wp, 'document') and wp.document and wp.document.mime_type and 'video' in wp.document.mime_type:
+            try:
+                bot.send_document(
+                    message.chat.id,
+                    wp.document.file_id,
+                    reply_to_message_id=message.message_id,
+                    caption="⚡ Скопировано напрямую из предпросмотра Telegram!"
+                )
+                return True
+            except Exception:
+                pass
+
+    return False
 
 def download_and_send(message, video_url, status_msg, caption):
-    """Загрузка файла по ссылке и отправка в чат"""
+    """Загрузка файла по ссылке и отправка в чат (Резервный вариант)"""
     temp_dir = tempfile.gettempdir()
     filename = os.path.join(temp_dir, f"vid_{uuid.uuid4().hex}.mp4")
 
@@ -106,9 +118,38 @@ def download_and_send(message, video_url, status_msg, caption):
             except Exception:
                 pass
 
+def parse_og_video_url(url, mirrors):
+    """Считывание прямой ссылки из OpenGraph метатегов"""
+    for mirror in mirrors:
+        try:
+            target_url = url
+            if 'instagram.com' in url or 'instagr.am' in url:
+                target_url = re.sub(r'https?://(www\.)?instagr(\.am|am\.com)', f'https://{mirror}', url)
+            elif 'tiktok.com' in url:
+                target_url = re.sub(r'https?://(www\.|vm\.|vt\.)?tiktok\.com', f'https://{mirror}', url)
+
+            res = requests.get(target_url, headers=HEADERS, timeout=10, allow_redirects=True)
+            if res.status_code == 200:
+                match = re.search(r'property=["\']og:video(?::secure_url)?["\']\s+content=["\']([^"\']+)["\']', res.text, re.IGNORECASE)
+                if not match:
+                    match = re.search(r'content=["\']([^"\']+\.mp4[^"\']*)["\']', res.text, re.IGNORECASE)
+                
+                if match:
+                    direct_url = match.group(1).replace('&amp;', '&')
+                    if direct_url.startswith('http'):
+                        return direct_url
+        except Exception:
+            continue
+    return None
+
 # --- TIKTOK ---
 @bot.message_handler(func=lambda msg: msg.text and 'tiktok.com' in msg.text)
 def download_tiktok(message):
+    # 1. Попытка забрать видео мгновенно из Link Preview Telegram
+    if try_send_from_telegram_preview(message):
+        return
+
+    # 2. Если предпросмотра нет, скачиваем резервным путем
     status_msg = bot.reply_to(message, "⏳ Извлекаю видео из TikTok...")
     url = message.text.strip()
 
@@ -133,6 +174,11 @@ def download_tiktok(message):
 # --- INSTAGRAM ---
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['instagram.com', 'instagr.am']))
 def download_instagram(message):
+    # 1. Попытка забрать видео мгновенно из Link Preview Telegram
+    if try_send_from_telegram_preview(message):
+        return
+
+    # 2. Резервный путь
     status_msg = bot.reply_to(message, "⏳ Извлекаю Instagram Reels...")
     url = message.text.strip()
 
@@ -143,7 +189,7 @@ def download_instagram(message):
     else:
         bot.edit_message_text("❌ Не удалось извлечь Reels с Instagram.", message.chat.id, status_msg.message_id)
 
-# --- YOUTUBE SHORTS (Многоуровневая обработка) ---
+# --- YOUTUBE SHORTS ---
 def extract_youtube_id(url):
     match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
     return match.group(1) if match else None
@@ -151,7 +197,6 @@ def extract_youtube_id(url):
 def get_youtube_stream_link(video_id):
     clean_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # 1. Запрос к Cobalt API
     try:
         c_res = requests.post(
             "https://api.cobalt.tools/",
@@ -166,7 +211,6 @@ def get_youtube_stream_link(video_id):
     except Exception:
         pass
 
-    # 2. Запрос к Piped API (выбираем видео со звуком)
     piped_instances = ["https://pipedapi.kavin.rocks", "https://api.piped.yt", "https://pipedapi.mha.fi"]
     for instance in piped_instances:
         try:
@@ -179,7 +223,6 @@ def get_youtube_stream_link(video_id):
         except Exception:
             continue
 
-    # 3. Запрос к шлюзу Invidious
     invidious_gateways = [
         f"https://inv.nadeko.net/latest_version?id={video_id}&itag=18",
         f"https://invidious.nerdvpn.de/latest_version?id={video_id}&itag=18"
@@ -196,6 +239,11 @@ def get_youtube_stream_link(video_id):
 
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
+    # 1. Попытка забрать видео мгновенно из Link Preview Telegram
+    if try_send_from_telegram_preview(message):
+        return
+
+    # 2. Резервный путь
     status_msg = bot.reply_to(message, "⏳ Извлекаю YouTube Shorts...")
     url = message.text.strip()
     video_id = extract_youtube_id(url)
