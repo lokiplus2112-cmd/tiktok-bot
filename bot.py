@@ -36,7 +36,7 @@ HEADERS = {
 def start_cmd(message):
     bot.reply_to(
         message, 
-        "👋 Привет! Отправь мне ссылку на видео из **TikTok** или **Instagram (Reels)**, и я скачаю его для тебя!"
+        "👋 Привет! Отправь мне ссылку на видео из **TikTok**, **Instagram (Reels)** или **YouTube (Shorts)**, и я скачаю его для тебя!"
     )
 
 # --- ОБРАБОТКА TIKTOK ---
@@ -93,7 +93,6 @@ def download_tiktok(message):
 
 # --- ОБРАБОТКА INSTAGRAM ---
 def get_instagram_direct_url(url):
-    """Попытка мгновенно извлечь mp4 через ddinstagram / vxinstagram"""
     for mirror in ['ddinstagram.com', 'vxinstagram.com']:
         try:
             mirror_url = url.replace('instagram.com', mirror).replace('instagr.am', mirror)
@@ -117,7 +116,6 @@ def download_instagram(message):
     filename = os.path.join(temp_dir, f"ig_{uuid.uuid4().hex}.mp4")
     
     try:
-        # 1. Быстрый способ через зеркала
         video_url = get_instagram_direct_url(url)
         download_success = False
 
@@ -130,12 +128,11 @@ def download_instagram(message):
                         for chunk in res.iter_content(chunk_size=1024 * 1024):
                             if chunk:
                                 f.write(chunk)
-                    if os.path.getsize(filename) > 10000:  # проверяем, что файл не пустой
+                    if os.path.getsize(filename) > 10000:
                         download_success = True
             except Exception:
                 download_success = False
 
-        # 2. Резервный способ через yt-dlp
         if not download_success:
             bot.edit_message_text("⏳ Скачиваю видео (резервный канал)...", message.chat.id, status_msg.message_id)
             ydl_opts = {
@@ -149,7 +146,6 @@ def download_instagram(message):
             if os.path.exists(filename) and os.path.getsize(filename) > 10000:
                 download_success = True
 
-        # Отправка видео
         if download_success:
             bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
             with open(filename, 'rb') as video:
@@ -162,7 +158,52 @@ def download_instagram(message):
                 )
             bot.delete_message(message.chat.id, status_msg.message_id)
         else:
-            bot.edit_message_text("❌ Не удалось скачать видео с Instagram (возможно, аккаунт приватный).", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("❌ Не удалось скачать видео с Instagram.", message.chat.id, status_msg.message_id)
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка при скачивании: {e}", message.chat.id, status_msg.message_id)
+    finally:
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
+
+# --- ОБРАБОТКА YOUTUBE SHORTS ---
+@bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
+def download_youtube(message):
+    status_msg = bot.reply_to(message, "⏳ Получаю видео из YouTube...")
+    url = message.text.strip()
+    
+    temp_dir = tempfile.gettempdir()
+    filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
+    
+    try:
+        bot.edit_message_text("⏳ Скачиваю YouTube Shorts...", message.chat.id, status_msg.message_id)
+        
+        ydl_opts = {
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': filename,
+            'quiet': True,
+            'no_warnings': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+            
+        if os.path.exists(filename) and os.path.getsize(filename) > 10000:
+            bot.edit_message_text("📤 Отправляю в чат...", message.chat.id, status_msg.message_id)
+            with open(filename, 'rb') as video:
+                bot.send_video(
+                    message.chat.id, 
+                    video, 
+                    reply_to_message_id=message.message_id,
+                    caption="✅ YouTube Shorts готово!",
+                    timeout=300
+                )
+            bot.delete_message(message.chat.id, status_msg.message_id)
+        else:
+            bot.edit_message_text("❌ Не удалось скачать видео с YouTube.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка при скачивании: {e}", message.chat.id, status_msg.message_id)
@@ -175,5 +216,5 @@ def download_instagram(message):
 
 if __name__ == '__main__':
     threading.Thread(target=run_web).start()
-    print("🚀 Бот запущен! Поддерживает TikTok и Instagram.")
+    print("🚀 Бот запущен! Поддерживает TikTok, Instagram и YouTube Shorts.")
     bot.infinity_polling()
