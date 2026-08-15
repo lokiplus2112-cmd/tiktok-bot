@@ -35,9 +35,18 @@ MAX_VIDEO_SIZE = 48 * 1024 * 1024       # ~48 МБ (для плеера)
 MAX_DOCUMENT_SIZE = 1950 * 1024 * 1024  # ~1.95 ГБ (как документ)
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 }
 processed_messages = set()
+
+# Список рабочих публичных прокси-серверов для ротации yt-dlp
+PUBLIC_PROXIES = [
+    None, # Сначала пробуем без прокси
+    "http://185.199.229.156:7492",
+    "http://45.152.188.243:3128",
+    "socks5://188.225.27.157:1080",
+    "http://194.26.29.245:8080"
+]
 
 # --- Вспомогательные функции ---
 def get_main_keyboard():
@@ -64,9 +73,10 @@ def try_send_from_telegram_preview(message):
             pass
     return False
 
-def download_file_by_url(url, filename):
+def download_file_by_url(url, filename, proxy=None):
     try:
-        res = requests.get(url, headers=HEADERS, stream=True, timeout=40)
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        res = requests.get(url, headers=HEADERS, proxies=proxies, stream=True, timeout=40)
         res.raise_for_status()
         with open(filename, 'wb') as f:
             for chunk in res.iter_content(chunk_size=1024 * 1024):
@@ -316,7 +326,7 @@ def download_instagram(message):
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
 
-# YouTube (Многоуровневый обход через Piped + Invidious + Cobalt + Direct YT-DLP)
+# YouTube (Многоуровневый обход с подключением Прокси)
 @bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
     if try_send_from_telegram_preview(message): 
@@ -328,12 +338,13 @@ def download_youtube(message):
     
     download_success = False
 
-    # Метод 1: Через независимые узлы Piped API (надежнее всего обходит блокировки)
+    # 1. Piped API Прокси-Зеркала
     if video_id:
         piped_instances = [
             "https://pipedapi.kavin.rocks",
             "https://api.piped.private.coffee",
-            "https://pipedapi.mha.fi"
+            "https://pipedapi.mha.fi",
+            "https://piped-api.garudalinux.org"
         ]
         for api_host in piped_instances:
             try:
@@ -341,7 +352,6 @@ def download_youtube(message):
                 if r.status_code == 200:
                     data = r.json()
                     video_streams = data.get('videoStreams', [])
-                    # Выбираем максимальное доступное качество с видео+звуком
                     combined_streams = [s for s in video_streams if s.get('videoOnly') is False]
                     if not combined_streams:
                         combined_streams = video_streams
@@ -354,50 +364,50 @@ def download_youtube(message):
             except Exception:
                 continue
 
-    # Метод 2: Через Cobalt API
-    if not download_success:
-        cobalt_instances = [
-            "https://co.wuk.sh/api/json",
-            "https://api.cobalt.tools/api/json",
-            "https://cobalt-api.kwiatekm.com/api/json"
+    # 2. Invidious API
+    if not download_success and video_id:
+        invidious_instances = [
+            "https://invidious.nerdvpn.de",
+            "https://inv.us.projectsegfau.lt",
+            "https://invidious.flokinet.to"
         ]
-        for inst in cobalt_instances:
+        for inv in invidious_instances:
             try:
-                res = requests.post(
-                    inst,
-                    json={"url": url, "vQuality": "max"},
-                    headers={"Accept": "application/json", "Content-Type": "application/json"},
-                    timeout=10
-                )
-                if res.status_code == 200:
-                    dl_url = res.json().get("url")
-                    if dl_url and download_file_by_url(dl_url, filename):
-                        download_success = True
-                        break
+                r = requests.get(f"{inv}/api/v1/videos/{video_id}", timeout=8)
+                if r.status_code == 200:
+                    format_streams = r.json().get('formatStreams', [])
+                    if format_streams:
+                        dl_url = format_streams[-1]['url']
+                        if download_file_by_url(dl_url, filename):
+                            download_success = True
+                            break
             except Exception:
                 continue
 
-    # Метод 3: Резервный yt-dlp с WEB_EMBEDDED и TV клиентами
+    # 3. Yt-Dlp с перебором IP-прокси
     if not download_success:
-        try:
-            ydl_opts = {
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                'outtmpl': filename,
-                'quiet': True,
-                'merge_output_format': 'mp4',
-                'socket_timeout': 30,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['web_embedded', 'tv_embedded', 'android_vr']
+        for proxy_url in PUBLIC_PROXIES:
+            try:
+                ydl_opts = {
+                    'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                    'outtmpl': filename,
+                    'quiet': True,
+                    'merge_output_format': 'mp4',
+                    'socket_timeout': 15,
+                    'proxy': proxy_url,
+                    'extractor_args': {
+                        'youtube': {
+                            'player_client': ['tv', 'android_vr', 'web_embedded']
+                        }
                     }
                 }
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            if os.path.exists(filename) and os.path.getsize(filename) > 5000:
-                download_success = True
-        except Exception:
-            pass
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                if os.path.exists(filename) and os.path.getsize(filename) > 5000:
+                    download_success = True
+                    break
+            except Exception:
+                continue
 
     # Результат
     if download_success and os.path.exists(filename):
@@ -406,7 +416,7 @@ def download_youtube(message):
             os.remove(filename)
     else:
         bot.edit_message_text(
-            "❌ Не удалось загрузить видео. Перепроверьте ссылку или попробуйте чуть позже.", 
+            "❌ Не удалось загрузить видео. Сервер YouTube временно заблокировал доступ.", 
             message.chat.id, 
             status_msg.message_id
         )
