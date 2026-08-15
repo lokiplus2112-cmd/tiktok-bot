@@ -118,9 +118,9 @@ def check_and_send_video(message, filename, status_msg, caption):
 def get_instagram_media_urls(url):
     urls = []
     instances = [
-        "https://api.cobalt.tools/",
-        "https://cobalt-api.kwiatekm.com/",
-        "https://co.wuk.sh/"
+        "https://co.wuk.sh/api/json",
+        "https://api.cobalt.tools/api/json",
+        "https://cobalt-api.kwiatekm.com/api/json"
     ]
     for inst in instances:
         try:
@@ -312,67 +312,74 @@ def download_instagram(message):
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
 
-# YouTube (Двойная защита от блокировки "Sign in to confirm you're not a bot")
+# YouTube (Защищенный вариант с обходом капчи/Sign in)
 @bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
     if try_send_from_telegram_preview(message): 
         return
-    status_msg = bot.reply_to(message, "⏳ Скачиваю YouTube видео...")
+    status_msg = bot.reply_to(message, "⏳ Обрабатываю YouTube видео...")
     filename = os.path.join(tempfile.gettempdir(), f"yt_{uuid.uuid4().hex}.mp4")
     url = message.text.strip()
     
-    # Способ 1: Через внешние API (Cobalt) — гарантированно обходит капчи и блокировки IP Render
-    try:
-        instances = [
-            "https://api.cobalt.tools/",
-            "https://cobalt-api.kwiatekm.com/",
-            "https://co.wuk.sh/"
-        ]
-        for inst in instances:
+    # 1. Загрузка через рабочие зеркала Cobalt API
+    instances = [
+        "https://co.wuk.sh/api/json",
+        "https://api.cobalt.tools/api/json",
+        "https://cobalt-api.kwiatekm.com/api/json"
+    ]
+    
+    download_success = False
+    
+    for inst in instances:
+        try:
             res = requests.post(
                 inst,
-                json={"url": url, "videoQuality": "max"},
+                json={"url": url, "vQuality": "max"},
                 headers={"Accept": "application/json", "Content-Type": "application/json"},
-                timeout=10
+                timeout=12
             )
             if res.status_code == 200:
                 data = res.json()
-                download_url = data.get("url")
-                if download_url and download_file_by_url(download_url, filename):
-                    check_and_send_video(message, filename, status_msg, "✅ YouTube видео (в оригинальном качестве)!")
-                    if os.path.exists(filename): os.remove(filename)
-                    return
-    except Exception:
-        pass
+                dl_url = data.get("url")
+                if dl_url and download_file_by_url(dl_url, filename):
+                    download_success = True
+                    break
+        except Exception:
+            continue
 
-    # Способ 2: Резервный yt-dlp с маскировкой под мобильные устройства (iOS / Android)
-    try:
-        ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-            'outtmpl': filename,
-            'quiet': True,
-            'merge_output_format': 'mp4',
-            'socket_timeout': 30,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['ios', 'mweb', 'android'],
-                    'skip': ['webpage', 'configs']
+    # 2. Резервный yt-dlp через клиенты Android VR / TV (не запрашивают авторизацию)
+    if not download_success:
+        try:
+            ydl_opts = {
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'outtmpl': filename,
+                'quiet': True,
+                'merge_output_format': 'mp4',
+                'socket_timeout': 30,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['android_vr', 'tv', 'web_embedded']
+                    }
                 }
             }
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-            
-        if os.path.exists(filename) and os.path.getsize(filename) > 5000:
-            check_and_send_video(message, filename, status_msg, "✅ YouTube видео!")
-            if os.path.exists(filename): 
-                os.remove(filename)
-        else:
-            bot.edit_message_text("❌ Не удалось загрузить видео с YouTube.", message.chat.id, status_msg.message_id)
-            
-    except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка YouTube: {e}", message.chat.id, status_msg.message_id)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            if os.path.exists(filename) and os.path.getsize(filename) > 5000:
+                download_success = True
+        except Exception:
+            pass
+
+    # Отправка видео
+    if download_success and os.path.exists(filename):
+        check_and_send_video(message, filename, status_msg, "✅ YouTube видео!")
+        if os.path.exists(filename):
+            os.remove(filename)
+    else:
+        bot.edit_message_text(
+            "❌ Не удалось загрузить видео. YouTube временно заблокировал запрос с сервера.", 
+            message.chat.id, 
+            status_msg.message_id
+        )
 
 # --- Запуск ---
 if __name__ == '__main__':
