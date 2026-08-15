@@ -181,7 +181,7 @@ def download_instagram(message):
             except Exception:
                 pass
 
-# --- YOUTUBE SHORTS (С ИСПОЛЬЗОВАНИЕМ COOKIES) ---
+# --- YOUTUBE SHORTS (С ПОДДЕРЖКОЙ COOKIES И УНИВЕРСАЛЬНЫМ ФОРМАТОМ) ---
 def extract_youtube_id(url):
     match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
     return match.group(1) if match else None
@@ -200,6 +200,37 @@ def download_youtube(message):
     filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
 
     try:
+        # Универсальный выбор форматов: сначала пытаемся взять <= 720p,
+        # если нет — берем лучшее единое видео (best), чтобы не было ошибки "format not available"
+        ydl_opts = {
+            'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+            'outtmpl': filename,
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 30,
+            'merge_output_format': 'mp4'  # Автоматически сшивает видео и аудио в mp4
+        }
+
+        # Проверяем и подключаем файл cookies.txt
+        if os.path.exists('cookies.txt'):
+            ydl_opts['cookiefile'] = 'cookies.txt'
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+
+        if os.path.exists(filename) and os.path.getsize(filename) > 30000:
+            check_and_send_video(message, filename, status_msg, "✅ YouTube Shorts готово!")
+        else:
+            bot.edit_message_text("❌ Не удалось загрузить видео с YouTube.", message.chat.id, status_msg.message_id)
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка скачивания YouTube: {e}", message.chat.id, status_msg.message_id)
+    finally:
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
         # Настройки yt-dlp с использованием файла cookies.txt и ограничением до 720p (против ошибки 413)
         ydl_opts = {
             'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
@@ -234,3 +265,4 @@ if __name__ == '__main__':
     threading.Thread(target=run_web).start()
     print("🚀 Бот запущен!")
     bot.infinity_polling()
+    
