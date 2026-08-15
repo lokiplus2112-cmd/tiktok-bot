@@ -186,7 +186,7 @@ def download_instagram(message):
             except Exception:
                 pass
 
-# --- YOUTUBE SHORTS ---
+# --- YOUTUBE SHORTS (ИСПРАВЛЕННЫЙ ВЫБОР ФОРМАТОВ) ---
 def extract_youtube_id(url):
     match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
     return match.group(1) if match else None
@@ -205,13 +205,13 @@ def download_youtube(message):
     filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
 
     try:
+        # Выбираем одиночный контейнер (видео + аудио вместе), не требующий FFmpeg
         ydl_opts = {
-            'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+            'format': 'best[height<=720]/bestvideo+bestaudio/best',
             'outtmpl': filename,
             'quiet': True,
             'no_warnings': True,
-            'socket_timeout': 30,
-            'merge_output_format': 'mp4'
+            'socket_timeout': 30
         }
 
         if os.path.exists('cookies.txt'):
@@ -236,17 +236,14 @@ def download_youtube(message):
 
 # --- ЗАПУСК ---
 if __name__ == '__main__':
-    # 1. Запуск Flask веб-сервера
     server_thread = threading.Thread(target=run_web, daemon=True)
     server_thread.start()
     
-    # 2. Сброс старых подключений к Telegram перед запуском
     try:
         bot.remove_webhook()
         time.sleep(1)
     except Exception:
         pass
 
-    # 3. Запуск основного цикла поллинга
     print("🚀 Бот и веб-сервер запущены!")
     bot.infinity_polling(skip_pending=True)
