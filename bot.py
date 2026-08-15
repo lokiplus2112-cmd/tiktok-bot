@@ -32,10 +32,10 @@ bot = telebot.TeleBot(TOKEN)
 
 # Лимиты Telegram API
 MAX_VIDEO_SIZE = 48 * 1024 * 1024       # ~48 МБ (для плеера)
-MAX_DOCUMENT_SIZE = 1950 * 1024 * 1024  # ~1.95 ГБ (как документ без потери качества)
+MAX_DOCUMENT_SIZE = 1950 * 1024 * 1024  # ~1.95 ГБ (как документ)
 
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
 processed_messages = set()
 
@@ -66,7 +66,7 @@ def try_send_from_telegram_preview(message):
 
 def download_file_by_url(url, filename):
     try:
-        res = requests.get(url, headers=HEADERS, stream=True, timeout=30)
+        res = requests.get(url, headers=HEADERS, stream=True, timeout=40)
         res.raise_for_status()
         with open(filename, 'wb') as f:
             for chunk in res.iter_content(chunk_size=1024 * 1024):
@@ -91,7 +91,6 @@ def check_and_send_video(message, filename, status_msg, caption):
     bot.edit_message_text(f"📤 Отправляю в чат ({size_mb} МБ)...", message.chat.id, status_msg.message_id)
     
     with open(filename, 'rb') as media_file:
-        # Если меньше 48 МБ — отправляем как обычное видео с плеером
         if file_size <= MAX_VIDEO_SIZE:
             bot.send_video(
                 message.chat.id, 
@@ -100,7 +99,6 @@ def check_and_send_video(message, filename, status_msg, caption):
                 caption=caption, 
                 timeout=300
             )
-        # Если от 48 МБ до 2 ГБ — отправляем как файл/документ без сжатия
         else:
             bot.send_document(
                 message.chat.id, 
@@ -114,7 +112,13 @@ def check_and_send_video(message, filename, status_msg, caption):
     bot.delete_message(message.chat.id, status_msg.message_id)
     processed_messages.add(message.message_id)
 
-# --- УНИВЕРСАЛЬНЫЙ ПОИСК МЕДИА ДЛЯ INSTAGRAM ---
+def extract_yt_video_id(url):
+    match = re.search(r'(?:v=|\/([0-9A-Za-z_-]{11})|youtu\.be\/)([0-9A-Za-z_-]{11})', url)
+    if match:
+        return match.group(1) or match.group(2)
+    return None
+
+# --- ПОИСК МЕДИА ДЛЯ INSTAGRAM ---
 def get_instagram_media_urls(url):
     urls = []
     instances = [
@@ -312,7 +316,7 @@ def download_instagram(message):
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
 
-# YouTube (Защищенный вариант с обходом капчи/Sign in)
+# YouTube (Многоуровневый обход через Piped + Invidious + Cobalt + Direct YT-DLP)
 @bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
     if try_send_from_telegram_preview(message): 
@@ -320,34 +324,60 @@ def download_youtube(message):
     status_msg = bot.reply_to(message, "⏳ Обрабатываю YouTube видео...")
     filename = os.path.join(tempfile.gettempdir(), f"yt_{uuid.uuid4().hex}.mp4")
     url = message.text.strip()
-    
-    # 1. Загрузка через рабочие зеркала Cobalt API
-    instances = [
-        "https://co.wuk.sh/api/json",
-        "https://api.cobalt.tools/api/json",
-        "https://cobalt-api.kwiatekm.com/api/json"
-    ]
+    video_id = extract_yt_video_id(url)
     
     download_success = False
-    
-    for inst in instances:
-        try:
-            res = requests.post(
-                inst,
-                json={"url": url, "vQuality": "max"},
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-                timeout=12
-            )
-            if res.status_code == 200:
-                data = res.json()
-                dl_url = data.get("url")
-                if dl_url and download_file_by_url(dl_url, filename):
-                    download_success = True
-                    break
-        except Exception:
-            continue
 
-    # 2. Резервный yt-dlp через клиенты Android VR / TV (не запрашивают авторизацию)
+    # Метод 1: Через независимые узлы Piped API (надежнее всего обходит блокировки)
+    if video_id:
+        piped_instances = [
+            "https://pipedapi.kavin.rocks",
+            "https://api.piped.private.coffee",
+            "https://pipedapi.mha.fi"
+        ]
+        for api_host in piped_instances:
+            try:
+                r = requests.get(f"{api_host}/streams/{video_id}", timeout=8)
+                if r.status_code == 200:
+                    data = r.json()
+                    video_streams = data.get('videoStreams', [])
+                    # Выбираем максимальное доступное качество с видео+звуком
+                    combined_streams = [s for s in video_streams if s.get('videoOnly') is False]
+                    if not combined_streams:
+                        combined_streams = video_streams
+                    
+                    if combined_streams:
+                        best_stream = combined_streams[0]['url']
+                        if download_file_by_url(best_stream, filename):
+                            download_success = True
+                            break
+            except Exception:
+                continue
+
+    # Метод 2: Через Cobalt API
+    if not download_success:
+        cobalt_instances = [
+            "https://co.wuk.sh/api/json",
+            "https://api.cobalt.tools/api/json",
+            "https://cobalt-api.kwiatekm.com/api/json"
+        ]
+        for inst in cobalt_instances:
+            try:
+                res = requests.post(
+                    inst,
+                    json={"url": url, "vQuality": "max"},
+                    headers={"Accept": "application/json", "Content-Type": "application/json"},
+                    timeout=10
+                )
+                if res.status_code == 200:
+                    dl_url = res.json().get("url")
+                    if dl_url and download_file_by_url(dl_url, filename):
+                        download_success = True
+                        break
+            except Exception:
+                continue
+
+    # Метод 3: Резервный yt-dlp с WEB_EMBEDDED и TV клиентами
     if not download_success:
         try:
             ydl_opts = {
@@ -358,7 +388,7 @@ def download_youtube(message):
                 'socket_timeout': 30,
                 'extractor_args': {
                     'youtube': {
-                        'player_client': ['android_vr', 'tv', 'web_embedded']
+                        'player_client': ['web_embedded', 'tv_embedded', 'android_vr']
                     }
                 }
             }
@@ -369,14 +399,14 @@ def download_youtube(message):
         except Exception:
             pass
 
-    # Отправка видео
+    # Результат
     if download_success and os.path.exists(filename):
         check_and_send_video(message, filename, status_msg, "✅ YouTube видео!")
         if os.path.exists(filename):
             os.remove(filename)
     else:
         bot.edit_message_text(
-            "❌ Не удалось загрузить видео. YouTube временно заблокировал запрос с сервера.", 
+            "❌ Не удалось загрузить видео. Перепроверьте ссылку или попробуйте чуть позже.", 
             message.chat.id, 
             status_msg.message_id
         )
