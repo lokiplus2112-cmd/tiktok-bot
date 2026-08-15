@@ -6,7 +6,7 @@ import telebot
 import yt_dlp
 
 # Токен вашего бота
-TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
+TOKEN = "8276557838:AAEYciE_o_-xzt5f0rb-3wtnEfGfAvw5p7Q"
 bot = telebot.TeleBot(TOKEN)
 
 # Файл с куками в корне проекта
