@@ -14,23 +14,27 @@ import yt_dlp
 TOKEN = '8276557838:AAH_wSAdcAlJwMp8c2wp7y8k0lnhVLePxVA'
 bot = telebot.TeleBot(TOKEN)
 
-# --- Веб-сервер для бесплатного тарифа Render ---
-app = Flask('')
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running!"
+    return "Bot is live!", 200
+
+@app.route('/healthz')
+def health():
+    return "OK", 200
 
 def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-# ------------------------------------------------
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+# -----------------------------
 
 apihelper.CONNECT_TIMEOUT = 300
 apihelper.READ_TIMEOUT = 300
 apihelper.CUSTOM_REQUEST_TIMEOUT = 300
 
-MAX_FILE_SIZE = 49 * 1024 * 1024  # Лимит Telegram Bot API — 49 МБ
+MAX_FILE_SIZE = 49 * 1024 * 1024  # Лимит Telegram API — 49 МБ
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
@@ -196,3 +200,46 @@ def download_youtube(message):
     if not video_id:
         bot.edit_message_text("❌ Некорректная ссылка на YouTube Shorts.", message.chat.id, status_msg.message_id)
         return
+
+    temp_dir = tempfile.gettempdir()
+    filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
+
+    try:
+        ydl_opts = {
+            'format': 'bestvideo[height<=720]+bestaudio/best[height<=720]/best',
+            'outtmpl': filename,
+            'quiet': True,
+            'no_warnings': True,
+            'socket_timeout': 30,
+            'merge_output_format': 'mp4'
+        }
+
+        if os.path.exists('cookies.txt'):
+            ydl_opts['cookiefile'] = 'cookies.txt'
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+
+        if os.path.exists(filename) and os.path.getsize(filename) > 30000:
+            check_and_send_video(message, filename, status_msg, "✅ YouTube Shorts готово!")
+        else:
+            bot.edit_message_text("❌ Не удалось загрузить видео с YouTube.", message.chat.id, status_msg.message_id)
+
+    except Exception as e:
+        bot.edit_message_text(f"❌ Ошибка скачивания YouTube: {e}", message.chat.id, status_msg.message_id)
+    finally:
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
+
+# --- ЗАПУСК ---
+if __name__ == '__main__':
+    # 1. Сначала запускаем веб-сервер в отдельном потоке
+    server_thread = threading.Thread(target=run_web, daemon=True)
+    server_thread.start()
+    
+    # 2. Запускаем polling бота
+    print("🚀 Бот и сервер запущены!")
+    bot.infinity_polling(skip_pending=True)
