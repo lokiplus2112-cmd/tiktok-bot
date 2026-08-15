@@ -2,10 +2,30 @@ import os
 import re
 import uuid
 import tempfile
+import threading
+import time
 import telebot
 import yt_dlp
+from flask import Flask
+from werkzeug.serving import run_simple
 
-# Токен вашего бота
+# ==========================================
+# 1. НАСТРОЙКИ ВЕБ-СЕРВЕРА ДЛЯ RENDER
+# ==========================================
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    run_simple('0.0.0.0', port, app, threaded=True)
+
+# ==========================================
+# 2. НАСТРОЙКИ БОТА
+# ==========================================
+# ВАЖНО: Вставьте сюда ваш токен от BotFather (с двоеточием!)
 TOKEN = "8276557838:AAEYciE_o_-xzt5f0rb-3wtnEfGfAvw5p7Q"
 bot = telebot.TeleBot(TOKEN)
 
@@ -13,21 +33,16 @@ bot = telebot.TeleBot(TOKEN)
 COOKIES_FILE = 'cookies.txt'
 
 def try_send_from_telegram_preview(message):
-    """Попытка переотправить видео напрямую из предпросмотра Telegram, если доступно."""
     return False
 
 def check_and_send_video(message, filename, status_msg, caption_text):
-    """Отправка видео пользователю с автоматическим сжатием при необходимости."""
     try:
         file_size_mb = os.path.getsize(filename) / (1024 * 1024)
         print(f"📦 Размер файла: {file_size_mb:.2f} MB")
         
-        # Если файл больше 48 МБ, предупреждаем и сжимаем
         if file_size_mb > 48:
             bot.edit_message_text("⚠️ Файл слишком большой. Сжимаю видео...", message.chat.id, status_msg.message_id)
             compressed_filename = os.path.join(tempfile.gettempdir(), f"compressed_{uuid.uuid4().hex}.mp4")
-            
-            # Быстрое сжатие с уменьшением качества/разрешения через ffmpeg
             os.system(f'ffmpeg -y -i "{filename}" -vf "scale=-2:720" -crf 28 -preset faster "{compressed_filename}"')
             
             if os.path.exists(compressed_filename) and os.path.getsize(compressed_filename) > 0:
@@ -37,19 +52,14 @@ def check_and_send_video(message, filename, status_msg, caption_text):
         bot.edit_message_text("⬆️ Загружаю видео в Telegram...", message.chat.id, status_msg.message_id)
         
         with open(filename, 'rb') as video:
-            bot.send_video(
-                message.chat.id, 
-                video, 
-                caption=caption_text, 
-                supports_streaming=True
-            )
+            bot.send_video(message.chat.id, video, caption=caption_text, supports_streaming=True)
         bot.delete_message(message.chat.id, status_msg.message_id)
         
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
         bot.edit_message_text("❌ Ошибка при отправке видео.", message.chat.id, status_msg.message_id)
 
-# --- TikTok & Instagram ---
+# --- Обработчик TikTok & Instagram ---
 @bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['tiktok.com', 'instagram.com']))
 def download_tiktok_instagram(message):
     status_msg = bot.reply_to(message, "⏳ Обрабатываю ссылку...")
@@ -84,7 +94,7 @@ def download_tiktok_instagram(message):
     else:
         bot.edit_message_text("❌ Не удалось скачать видео. Проверьте ссылку.", message.chat.id, status_msg.message_id)
 
-# --- YouTube ---
+# --- Обработчик YouTube ---
 @bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
     if try_send_from_telegram_preview(message): 
@@ -110,7 +120,6 @@ def download_youtube(message):
         }
     }
 
-    # Проверка наличия и размера файла cookies.txt
     if os.path.exists(COOKIES_FILE):
         print(f"✅ Файл cookies.txt найден ({os.path.getsize(COOKIES_FILE)} байт)")
         ydl_opts['cookiefile'] = COOKIES_FILE
@@ -137,11 +146,19 @@ def download_youtube(message):
             status_msg.message_id
         )
 
-# --- Start Command ---
+# --- Команда Start ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message, "👋 Привет! Отправь мне ссылку на TikTok, Instagram Reels или YouTube Shorts/Video, и я скачаю его!")
 
+# ==========================================
+# 3. ЗАПУСК ВСЕГО ВМЕСТЕ
+# ==========================================
 if __name__ == '__main__':
-    print("🤖 Бот запущен...")
-    bot.infinity_polling()
+    # 1. Запускаем Flask в фоновом потоке, чтобы Render увидел открытый порт
+    threading.Thread(target=run_web, daemon=True).start()
+    time.sleep(2) # Даем пару секунд серверу на запуск
+    
+    # 2. Запускаем самого бота
+    print("🤖 Бот успешно запущен и готов к работе...")
+    bot.infinity_polling(skip_pending=True)
