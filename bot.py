@@ -186,13 +186,12 @@ def download_instagram(message):
             except Exception:
                 pass
 
-# --- YOUTUBE SHORTS (СИСТЕМА БЫСТРОЙ ЗАГРУЗКИ) ---
+# --- YOUTUBE SHORTS ---
 def extract_youtube_id(url):
     match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
     return match.group(1) if match else None
 
 def get_youtube_cobalt_url(video_id):
-    """Быстрое получение прямой ссылки через зеркала Cobalt API"""
     clean_url = f"https://www.youtube.com/watch?v={video_id}"
     instances = [
         "https://api.cobalt.tools/",
@@ -237,13 +236,11 @@ def download_youtube(message):
     filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
 
     try:
-        # Способ 1: Использование быстрых Cobalt API сервисов
         direct_url = get_youtube_cobalt_url(video_id)
         if direct_url and download_file_by_url(direct_url, filename):
             check_and_send_video(message, filename, status_msg, "✅ YouTube Shorts готово!")
             return
 
-        # Способ 2 (Резервный): yt-dlp без жестких требований
         ydl_opts = {
             'format': 'b/best',
             'outtmpl': filename,
@@ -272,16 +269,24 @@ def download_youtube(message):
             except Exception:
                 pass
 
-# --- ЗАПУСК ---
+# --- ЗАПУСК С ЗАЩИТОЙ ОТ КОНФЛИКТА ---
 if __name__ == '__main__':
     server_thread = threading.Thread(target=run_web, daemon=True)
     server_thread.start()
     
+    # Пауза и жесткий сброс соединений, чтобы прошлый деплой успел умереть
+    time.sleep(3)
     try:
         bot.remove_webhook()
-        time.sleep(1)
     except Exception:
         pass
 
     print("🚀 Бот и веб-сервер запущены!")
-    bot.infinity_polling(skip_pending=True)
+    
+    # Автоперезапуск поллинга с обработкой конфликтов 409
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+        except Exception as e:
+            print(f"⚠️ Ошибка поллинга: {e}. Перезапуск через 5 сек...")
+            time.sleep(5)
