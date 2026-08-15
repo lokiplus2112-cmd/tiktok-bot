@@ -39,36 +39,46 @@ HEADERS = {
 }
 
 def check_and_send_video(message, filename, status_msg, caption):
-    """Проверка размера файла и отправка видео в Telegram"""
-    file_size = os.path.getsize(filename)
-    
-    if file_size > MAX_FILE_SIZE:
-        size_mb = round(file_size / (1024 * 1024), 1)
-        bot.edit_message_text(
-            f"⚠️ Видео слишком большое ({size_mb} МБ).\n"
-            f"Telegram запрещает ботам отправлять файлы больше 50 МБ.", 
-            message.chat.id, 
-            status_msg.message_id
-        )
-        return
+    """Проверка размера файла, сжатие с сохранением Aspect Ratio и отправка в Telegram"""
+    try:
+        file_size = os.path.getsize(filename)
+        file_size_mb = file_size / (1024 * 1024)
+        print(f"📦 Размер файла: {file_size_mb:.2f} MB")
+        
+        # Если файл больше 48 МБ, сжимаем с сохранением оригинальных пропорций
+        if file_size > MAX_FILE_SIZE:
+            bot.edit_message_text("⚠️ Файл слишком большой. Сжимаю видео (сохраняя пропорции)...", message.chat.id, status_msg.message_id)
+            compressed_filename = os.path.join(tempfile.gettempdir(), f"compressed_{uuid.uuid4().hex}.mp4")
+            
+            # scale='min(1280,iw)':-2 пропорционально уменьшает видео, сохраняя Aspect Ratio
+            os.system(f'ffmpeg -y -i "{filename}" -vf "scale=\'min(1280,iw)\':-2" -crf 28 -preset faster "{compressed_filename}"')
+            
+            if os.path.exists(compressed_filename) and os.path.getsize(compressed_filename) > 0:
+                os.remove(filename)
+                filename = compressed_filename
 
-    bot.edit_message_text("📤 Отправляю видео в чат...", message.chat.id, status_msg.message_id)
-    with open(filename, 'rb') as video:
-        bot.send_video(
-            message.chat.id, 
-            video, 
-            reply_to_message_id=message.message_id,
-            caption=caption,
-            timeout=300
-        )
-    bot.delete_message(message.chat.id, status_msg.message_id)
+        bot.edit_message_text("📤 Отправляю видео в чат...", message.chat.id, status_msg.message_id)
+        
+        with open(filename, 'rb') as video:
+            bot.send_video(
+                message.chat.id, 
+                video, 
+                reply_to_message_id=message.message_id,
+                caption=caption,
+                supports_streaming=True,
+                timeout=300
+            )
+        bot.delete_message(message.chat.id, status_msg.message_id)
+
+    except Exception as e:
+        print(f"❌ Ошибка отправки: {e}")
+        bot.edit_message_text("❌ Ошибка при отправке видео в Telegram.", message.chat.id, status_msg.message_id)
 
 def send_photos_group(message, photo_urls, status_msg, caption="✅ Фотографии загружены!"):
-    """Отправка списка изображений альбмом/группой в Telegram"""
+    """Отправка списка изображений альбомом в Telegram"""
     bot.edit_message_text("📤 Отправляю фотографии...", message.chat.id, status_msg.message_id)
     media_group = []
     
-    # Telegram разрешает отправлять до 10 медиафайлов в одной группе
     for idx, img_url in enumerate(photo_urls[:10]):
         if idx == 0:
             media_group.append(telebot.types.InputMediaPhoto(media=img_url, caption=caption))
@@ -98,7 +108,7 @@ def download_tiktok(message):
         if response.get('code') == 0:
             data = response['data']
             
-            # Проверяем, являются ли данные каруселью фотографий
+            # Если это карусель фотографий
             images = data.get('images')
             if images and isinstance(images, list):
                 send_photos_group(message, images, status_msg, "✅ Фотогалерея из TikTok!")
@@ -133,7 +143,6 @@ def download_tiktok(message):
 
 # --- INSTAGRAM (REELS + ФОТО / АЛЬБОМЫ) ---
 def get_instagram_media(url):
-    """Парсинг видео и фото из зеркала Instagram"""
     video_urls = []
     image_urls = []
     
@@ -142,14 +151,12 @@ def get_instagram_media(url):
             mirror_url = url.replace('instagram.com', mirror).replace('instagr.am', mirror)
             res = requests.get(mirror_url, headers=HEADERS, timeout=10)
             if res.status_code == 200:
-                # Поиск видео
                 v_matches = re.findall(r'property="og:video(?::secure_url)?"\s+content="([^"]+)"', res.text)
                 for v in v_matches:
                     clean_v = v.replace('&amp;', '&')
                     if clean_v not in video_urls:
                         video_urls.append(clean_v)
                 
-                # Поиск фото (если видео не найдены)
                 if not video_urls:
                     i_matches = re.findall(r'property="og:image"\s+content="([^"]+)"', res.text)
                     for img in i_matches:
@@ -175,7 +182,7 @@ def download_instagram(message):
     try:
         video_urls, image_urls = get_instagram_media(url)
         
-        # 1. Если нашли видео (Reels / Post Video)
+        # 1. Если видео
         if video_urls:
             bot.edit_message_text("⏳ Скачиваю Instagram видео...", message.chat.id, status_msg.message_id)
             res = requests.get(video_urls[0], headers=HEADERS, stream=True, timeout=60)
@@ -188,12 +195,12 @@ def download_instagram(message):
                     check_and_send_video(message, filename, status_msg, "✅ Instagram Reels!")
                     return
 
-        # 2. Если нашли фото / альбомы
+        # 2. Если фото / альбом
         if image_urls:
             send_photos_group(message, image_urls, status_msg, "✅ Фото из Instagram!")
             return
 
-        bot.edit_message_text("❌ Не удалось скачать медиа из Instagram. Возможно, профиль приватный.", message.chat.id, status_msg.message_id)
+        bot.edit_message_text("❌ Не удалось скачать медиа из Instagram.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
