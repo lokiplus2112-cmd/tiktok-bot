@@ -27,7 +27,7 @@ def run_web():
     run_simple('0.0.0.0', port, app, threaded=True)
 
 # --- Инициализация бота ---
-TOKEN = '8276557838:AAH_wSAdcAlJwMp8c2wp7y8k0lnhVLePxVA'
+TOKEN = '8276557838:AAFp9IwYJchZUG9RavgNZU2dV4scYTzpCro'
 bot = telebot.TeleBot(TOKEN)
 
 MAX_FILE_SIZE = 48 * 1024 * 1024
