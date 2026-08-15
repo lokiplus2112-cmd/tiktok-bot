@@ -39,15 +39,6 @@ HEADERS = {
 }
 processed_messages = set()
 
-# Список рабочих публичных прокси-серверов для ротации yt-dlp
-PUBLIC_PROXIES = [
-    None, # Сначала пробуем без прокси
-    "http://185.199.229.156:7492",
-    "http://45.152.188.243:3128",
-    "socks5://188.225.27.157:1080",
-    "http://194.26.29.245:8080"
-]
-
 # --- Вспомогательные функции ---
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -73,10 +64,9 @@ def try_send_from_telegram_preview(message):
             pass
     return False
 
-def download_file_by_url(url, filename, proxy=None):
+def download_file_by_url(url, filename, timeout=15):
     try:
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-        res = requests.get(url, headers=HEADERS, proxies=proxies, stream=True, timeout=40)
+        res = requests.get(url, headers=HEADERS, stream=True, timeout=timeout)
         res.raise_for_status()
         with open(filename, 'wb') as f:
             for chunk in res.iter_content(chunk_size=1024 * 1024):
@@ -84,6 +74,9 @@ def download_file_by_url(url, filename, proxy=None):
                     f.write(chunk)
         return os.path.exists(filename) and os.path.getsize(filename) > 5000
     except Exception: 
+        if os.path.exists(filename):
+            try: os.remove(filename)
+            except Exception: pass
         return False
 
 def check_and_send_video(message, filename, status_msg, caption):
@@ -132,9 +125,8 @@ def extract_yt_video_id(url):
 def get_instagram_media_urls(url):
     urls = []
     instances = [
-        "https://co.wuk.sh/api/json",
         "https://api.cobalt.tools/api/json",
-        "https://cobalt-api.kwiatekm.com/api/json"
+        "https://co.wuk.sh/api/json"
     ]
     for inst in instances:
         try:
@@ -142,7 +134,7 @@ def get_instagram_media_urls(url):
                 inst, 
                 json={"url": url, "downloadMode": "auto"}, 
                 headers={"Accept": "application/json", "Content-Type": "application/json"}, 
-                timeout=7
+                timeout=5
             )
             if res.status_code == 200:
                 data = res.json()
@@ -153,10 +145,10 @@ def get_instagram_media_urls(url):
         except Exception:
             continue
 
-    for mirror in ['ddinstagram.com', 'vxinstagram.com', 'kkinstagram.com']:
+    for mirror in ['ddinstagram.com', 'vxinstagram.com']:
         try:
             m_url = url.replace('instagram.com', mirror).replace('instagr.am', mirror)
-            res = requests.get(m_url, headers=HEADERS, timeout=8)
+            res = requests.get(m_url, headers=HEADERS, timeout=5)
             if res.status_code == 200:
                 match_vid = re.search(r'property="og:video(?::secure_url)?"\s+content="([^"]+)"', res.text)
                 if match_vid:
@@ -216,7 +208,7 @@ def download_tiktok(message):
     status_msg = bot.reply_to(message, "⏳ Обрабатываю TikTok...")
     try:
         api_url = f"https://www.tikwm.com/api/?url={message.text.strip()}&hd=1"
-        response = requests.get(api_url, headers=HEADERS, timeout=15).json()
+        response = requests.get(api_url, headers=HEADERS, timeout=10).json()
         if response.get('code') == 0:
             data = response['data']
             images = data.get('images')
@@ -228,7 +220,7 @@ def download_tiktok(message):
                 downloaded_files = []
                 for idx, img_url in enumerate(images[:10]):
                     f_path = os.path.join(temp_dir, f"tt_{uuid.uuid4().hex}_{idx}.jpg")
-                    if download_file_by_url(img_url, f_path):
+                    if download_file_by_url(img_url, f_path, timeout=10):
                         downloaded_files.append(f_path)
                         caption = "✅ TikTok слайд-шоу!" if idx == 0 else ""
                         media_group.append(types.InputMediaPhoto(open(f_path, 'rb'), caption=caption))
@@ -245,7 +237,7 @@ def download_tiktok(message):
             if video_url and not video_url.startswith('http'):
                 video_url = 'https://www.tikwm.com' + video_url
             filename = os.path.join(temp_dir, f"tt_{uuid.uuid4().hex}.mp4")
-            if download_file_by_url(video_url, filename):
+            if download_file_by_url(video_url, filename, timeout=15):
                 check_and_send_video(message, filename, status_msg, "✅ TikTok видео!")
                 if os.path.exists(filename): os.remove(filename)
             else: 
@@ -284,7 +276,7 @@ def download_instagram(message):
                 ext = ".mp4" if is_video else ".jpg"
                 f_path = os.path.join(temp_dir, f"ig_{uuid.uuid4().hex}_{idx}{ext}")
                 
-                if download_file_by_url(item_url, f_path):
+                if download_file_by_url(item_url, f_path, timeout=10):
                     downloaded_files.append(f_path)
                     caption = "✅ Instagram Альбом!" if idx == 0 else ""
                     if is_video:
@@ -307,14 +299,14 @@ def download_instagram(message):
         
         if is_video:
             filename = os.path.join(temp_dir, f"ig_{uuid.uuid4().hex}.mp4")
-            if download_file_by_url(single_url, filename):
+            if download_file_by_url(single_url, filename, timeout=15):
                 check_and_send_video(message, filename, status_msg, "✅ Instagram Reels!")
                 if os.path.exists(filename): os.remove(filename)
             else:
                 bot.edit_message_text("❌ Ошибка скачивания видео.", message.chat.id, status_msg.message_id)
         else:
             filename = os.path.join(temp_dir, f"ig_{uuid.uuid4().hex}.jpg")
-            if download_file_by_url(single_url, filename):
+            if download_file_by_url(single_url, filename, timeout=10):
                 with open(filename, 'rb') as photo:
                     bot.send_photo(message.chat.id, photo, reply_to_message_id=message.message_id, caption="🖼 Instagram Фото!")
                 bot.delete_message(message.chat.id, status_msg.message_id)
@@ -326,7 +318,7 @@ def download_instagram(message):
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
 
-# YouTube (Многоуровневый обход с подключением Прокси)
+# YouTube (Быстрый обход с таймаутом 4 секунды на источник)
 @bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
     if try_send_from_telegram_preview(message): 
@@ -338,76 +330,69 @@ def download_youtube(message):
     
     download_success = False
 
-    # 1. Piped API Прокси-Зеркала
-    if video_id:
+    # 1. Быстрая проверка через Cobalt API (3-4 сек)
+    cobalt_instances = [
+        "https://api.cobalt.tools/api/json",
+        "https://co.wuk.sh/api/json"
+    ]
+    for inst in cobalt_instances:
+        try:
+            res = requests.post(
+                inst,
+                json={"url": url, "vQuality": "max"},
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=4
+            )
+            if res.status_code == 200:
+                dl_url = res.json().get("url")
+                if dl_url and download_file_by_url(dl_url, filename, timeout=20):
+                    download_success = True
+                    break
+        except Exception:
+            continue
+
+    # 2. Быстрая проверка через Piped API (3 сек)
+    if not download_success and video_id:
         piped_instances = [
             "https://pipedapi.kavin.rocks",
             "https://api.piped.private.coffee",
-            "https://pipedapi.mha.fi",
-            "https://piped-api.garudalinux.org"
+            "https://pipedapi.mha.fi"
         ]
         for api_host in piped_instances:
             try:
-                r = requests.get(f"{api_host}/streams/{video_id}", timeout=8)
+                r = requests.get(f"{api_host}/streams/{video_id}", timeout=3)
                 if r.status_code == 200:
                     data = r.json()
                     video_streams = data.get('videoStreams', [])
                     combined_streams = [s for s in video_streams if s.get('videoOnly') is False]
-                    if not combined_streams:
-                        combined_streams = video_streams
-                    
-                    if combined_streams:
-                        best_stream = combined_streams[0]['url']
-                        if download_file_by_url(best_stream, filename):
-                            download_success = True
-                            break
+                    best_stream = (combined_streams or video_streams)[0]['url']
+                    if download_file_by_url(best_stream, filename, timeout=20):
+                        download_success = True
+                        break
             except Exception:
                 continue
 
-    # 2. Invidious API
-    if not download_success and video_id:
-        invidious_instances = [
-            "https://invidious.nerdvpn.de",
-            "https://inv.us.projectsegfau.lt",
-            "https://invidious.flokinet.to"
-        ]
-        for inv in invidious_instances:
-            try:
-                r = requests.get(f"{inv}/api/v1/videos/{video_id}", timeout=8)
-                if r.status_code == 200:
-                    format_streams = r.json().get('formatStreams', [])
-                    if format_streams:
-                        dl_url = format_streams[-1]['url']
-                        if download_file_by_url(dl_url, filename):
-                            download_success = True
-                            break
-            except Exception:
-                continue
-
-    # 3. Yt-Dlp с перебором IP-прокси
+    # 3. Резервный yt-dlp без длительных зависаний (таймаут соединения 10 сек)
     if not download_success:
-        for proxy_url in PUBLIC_PROXIES:
-            try:
-                ydl_opts = {
-                    'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                    'outtmpl': filename,
-                    'quiet': True,
-                    'merge_output_format': 'mp4',
-                    'socket_timeout': 15,
-                    'proxy': proxy_url,
-                    'extractor_args': {
-                        'youtube': {
-                            'player_client': ['tv', 'android_vr', 'web_embedded']
-                        }
+        try:
+            ydl_opts = {
+                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                'outtmpl': filename,
+                'quiet': True,
+                'merge_output_format': 'mp4',
+                'socket_timeout': 10,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['tv', 'android_vr', 'web_embedded']
                     }
                 }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-                if os.path.exists(filename) and os.path.getsize(filename) > 5000:
-                    download_success = True
-                    break
-            except Exception:
-                continue
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            if os.path.exists(filename) and os.path.getsize(filename) > 5000:
+                download_success = True
+        except Exception:
+            pass
 
     # Результат
     if download_success and os.path.exists(filename):
@@ -416,7 +401,7 @@ def download_youtube(message):
             os.remove(filename)
     else:
         bot.edit_message_text(
-            "❌ Не удалось загрузить видео. Сервер YouTube временно заблокировал доступ.", 
+            "❌ Не удалось загрузить видео. Перепроверьте ссылку или попробуйте другое видео.", 
             message.chat.id, 
             status_msg.message_id
         )
