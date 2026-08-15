@@ -11,7 +11,7 @@ from flask import Flask
 from werkzeug.serving import run_simple
 import yt_dlp
 
-# --- Web-сервер для поддержки активности Render ---
+# --- Web-сервер для Render ---
 app = Flask('')
 
 @app.route('/')
@@ -27,6 +27,7 @@ def run_web():
     run_simple('0.0.0.0', port, app, threaded=True)
 
 # --- Инициализация бота ---
+# Вставьте сюда ВАШ НОВЫЙ токен от BotFather
 TOKEN = '8276557838:AAFp9IwYJchZUG9RavgNZU2dV4scYTzpCro'
 bot = telebot.TeleBot(TOKEN)
 
@@ -39,7 +40,9 @@ HEADERS = {
 }
 processed_messages = set()
 
-# --- Вспомогательные функции ---
+# Путь к куки-файлу
+COOKIES_FILE = os.path.join(os.path.dirname(__file__), 'cookies.txt')
+
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     btn_info = types.KeyboardButton("💻 Как пользоваться на ПК?")
@@ -115,55 +118,7 @@ def check_and_send_video(message, filename, status_msg, caption):
     bot.delete_message(message.chat.id, status_msg.message_id)
     processed_messages.add(message.message_id)
 
-def extract_yt_video_id(url):
-    match = re.search(r'(?:v=|\/([0-9A-Za-z_-]{11})|youtu\.be\/)([0-9A-Za-z_-]{11})', url)
-    if match:
-        return match.group(1) or match.group(2)
-    return None
-
-# --- ПОИСК МЕДИА ДЛЯ INSTAGRAM ---
-def get_instagram_media_urls(url):
-    urls = []
-    instances = [
-        "https://api.cobalt.tools/api/json",
-        "https://co.wuk.sh/api/json"
-    ]
-    for inst in instances:
-        try:
-            res = requests.post(
-                inst, 
-                json={"url": url, "downloadMode": "auto"}, 
-                headers={"Accept": "application/json", "Content-Type": "application/json"}, 
-                timeout=5
-            )
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("url"):
-                    return [data.get("url")]
-                elif data.get("picker"):
-                    return [item["url"] for item in data["picker"]]
-        except Exception:
-            continue
-
-    for mirror in ['ddinstagram.com', 'vxinstagram.com']:
-        try:
-            m_url = url.replace('instagram.com', mirror).replace('instagr.am', mirror)
-            res = requests.get(m_url, headers=HEADERS, timeout=5)
-            if res.status_code == 200:
-                match_vid = re.search(r'property="og:video(?::secure_url)?"\s+content="([^"]+)"', res.text)
-                if match_vid:
-                    urls.append(match_vid.group(1).replace('&amp;', '&'))
-                    break
-                match_img = re.search(r'property="og:image"\s+content="([^"]+)"', res.text)
-                if match_img:
-                    urls.append(match_img.group(1).replace('&amp;', '&'))
-                    break
-        except Exception:
-            continue
-
-    return urls
-
-# --- ОБРАБОТЧИКИ КОМАНД И КНОПОК ---
+# --- ОБРАБОТЧИКИ КОМАНД ---
 @bot.message_handler(commands=['start', 'help'])
 def start_cmd(message):
     bot.reply_to(
@@ -198,9 +153,7 @@ def help_info(message):
         reply_markup=get_main_keyboard()
     )
 
-# --- ОБРАБОТЧИКИ ССЫЛОК ---
-
-# TikTok
+# --- TikTok ---
 @bot.message_handler(func=lambda msg: msg.text and 'tiktok.com' in msg.text)
 def download_tiktok(message):
     if try_send_from_telegram_preview(message): 
@@ -247,78 +200,7 @@ def download_tiktok(message):
     except Exception as e: 
         bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
 
-# Instagram
-@bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['instagram.com', 'instagr.am']))
-def download_instagram(message):
-    if try_send_from_telegram_preview(message): 
-        return
-    status_msg = bot.reply_to(message, "⏳ Получаю контент из Instagram...")
-    temp_dir = tempfile.gettempdir()
-    
-    try:
-        media_urls = get_instagram_media_urls(message.text.strip())
-        
-        if not media_urls:
-            bot.edit_message_text(
-                "❌ Не удалось получить контент. Аккаунт может быть закрытым или ссылка недействительна.", 
-                message.chat.id, 
-                status_msg.message_id
-            )
-            return
-
-        if len(media_urls) > 1:
-            bot.edit_message_text(f"📸 Загружаю карусель ({len(media_urls)} ф.)...", message.chat.id, status_msg.message_id)
-            media_group = []
-            downloaded_files = []
-
-            for idx, item_url in enumerate(media_urls[:10]):
-                is_video = ".mp4" in item_url.lower() or "video" in item_url.lower()
-                ext = ".mp4" if is_video else ".jpg"
-                f_path = os.path.join(temp_dir, f"ig_{uuid.uuid4().hex}_{idx}{ext}")
-                
-                if download_file_by_url(item_url, f_path, timeout=10):
-                    downloaded_files.append(f_path)
-                    caption = "✅ Instagram Альбом!" if idx == 0 else ""
-                    if is_video:
-                        media_group.append(types.InputMediaVideo(open(f_path, 'rb'), caption=caption))
-                    else:
-                        media_group.append(types.InputMediaPhoto(open(f_path, 'rb'), caption=caption))
-
-            if media_group:
-                bot.send_media_group(message.chat.id, media_group, reply_to_message_id=message.message_id)
-                bot.delete_message(message.chat.id, status_msg.message_id)
-                processed_messages.add(message.message_id)
-
-            for f_path in downloaded_files:
-                try: os.remove(f_path)
-                except Exception: pass
-            return
-
-        single_url = media_urls[0]
-        is_video = ".mp4" in single_url.lower() or "video" in single_url.lower() or "/v/" in single_url.lower()
-        
-        if is_video:
-            filename = os.path.join(temp_dir, f"ig_{uuid.uuid4().hex}.mp4")
-            if download_file_by_url(single_url, filename, timeout=15):
-                check_and_send_video(message, filename, status_msg, "✅ Instagram Reels!")
-                if os.path.exists(filename): os.remove(filename)
-            else:
-                bot.edit_message_text("❌ Ошибка скачивания видео.", message.chat.id, status_msg.message_id)
-        else:
-            filename = os.path.join(temp_dir, f"ig_{uuid.uuid4().hex}.jpg")
-            if download_file_by_url(single_url, filename, timeout=10):
-                with open(filename, 'rb') as photo:
-                    bot.send_photo(message.chat.id, photo, reply_to_message_id=message.message_id, caption="🖼 Instagram Фото!")
-                bot.delete_message(message.chat.id, status_msg.message_id)
-                processed_messages.add(message.message_id)
-                if os.path.exists(filename): os.remove(filename)
-            else:
-                bot.edit_message_text("❌ Ошибка скачивания фото.", message.chat.id, status_msg.message_id)
-
-    except Exception as e:
-        bot.edit_message_text(f"❌ Ошибка: {e}", message.chat.id, status_msg.message_id)
-
-# YouTube (Быстрый обход с таймаутом 4 секунды на источник)
+# --- YouTube ---
 @bot.message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
     if try_send_from_telegram_preview(message): 
@@ -326,94 +208,60 @@ def download_youtube(message):
     status_msg = bot.reply_to(message, "⏳ Обрабатываю YouTube видео...")
     filename = os.path.join(tempfile.gettempdir(), f"yt_{uuid.uuid4().hex}.mp4")
     url = message.text.strip()
-    video_id = extract_yt_video_id(url)
     
-    download_success = False
-
-    # 1. Быстрая проверка через Cobalt API (3-4 сек)
-    cobalt_instances = [
-        "https://api.cobalt.tools/api/json",
-        "https://co.wuk.sh/api/json"
-    ]
-    for inst in cobalt_instances:
-        try:
-            res = requests.post(
-                inst,
-                json={"url": url, "vQuality": "max"},
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-                timeout=4
-            )
-            if res.status_code == 200:
-                dl_url = res.json().get("url")
-                if dl_url and download_file_by_url(dl_url, filename, timeout=20):
-                    download_success = True
-                    break
-        except Exception:
-            continue
-
-    # 2. Быстрая проверка через Piped API (3 сек)
-    if not download_success and video_id:
-        piped_instances = [
-            "https://pipedapi.kavin.rocks",
-            "https://api.piped.private.coffee",
-            "https://pipedapi.mha.fi"
-        ]
-        for api_host in piped_instances:
-            try:
-                r = requests.get(f"{api_host}/streams/{video_id}", timeout=3)
-                if r.status_code == 200:
-                    data = r.json()
-                    video_streams = data.get('videoStreams', [])
-                    combined_streams = [s for s in video_streams if s.get('videoOnly') is False]
-                    best_stream = (combined_streams or video_streams)[0]['url']
-                    if download_file_by_url(best_stream, filename, timeout=20):
-                        download_success = True
-                        break
-            except Exception:
-                continue
-
-    # 3. Резервный yt-dlp без длительных зависаний (таймаут соединения 10 сек)
-    if not download_success:
-        try:
-            ydl_opts = {
-                'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-                'outtmpl': filename,
-                'quiet': True,
-                'merge_output_format': 'mp4',
-                'socket_timeout': 10,
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['tv', 'android_vr', 'web_embedded']
-                    }
-                }
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': filename,
+        'quiet': True,
+        'merge_output_format': 'mp4',
+        'socket_timeout': 30,
+        'nocheckcertificate': True,
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'tv']
             }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
-            if os.path.exists(filename) and os.path.getsize(filename) > 5000:
-                download_success = True
-        except Exception:
-            pass
+        }
+    }
 
-    # Результат
+    if os.path.exists(COOKIES_FILE):
+        ydl_opts['cookiefile'] = COOKIES_FILE
+
+    download_success = False
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        if os.path.exists(filename) and os.path.getsize(filename) > 5000:
+            download_success = True
+    except Exception as e:
+        print(f"YT Error: {e}")
+
     if download_success and os.path.exists(filename):
         check_and_send_video(message, filename, status_msg, "✅ YouTube видео!")
         if os.path.exists(filename):
             os.remove(filename)
     else:
         bot.edit_message_text(
-            "❌ Не удалось загрузить видео. Перепроверьте ссылку или попробуйте другое видео.", 
+            "❌ YouTube заблокировал доступ. Проверьте наличие корректного cookies.txt в GitHub.", 
             message.chat.id, 
             status_msg.message_id
         )
 
-# --- Запуск ---
+# --- Запуск с защитой от вылетов (Conflict 409) ---
 if __name__ == '__main__':
     threading.Thread(target=run_web, daemon=True).start()
     time.sleep(2)
-    try:
-        bot.remove_webhook()
-    except Exception:
-        pass
     
-    print("🚀 Бот успешно запущен!")
-    bot.infinity_polling(skip_pending=True)
+    print("🚀 Бот запускается...")
+    while True:
+        try:
+            bot.remove_webhook()
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+        except telebot.apihelper.ApiTelegramException as e:
+            if e.error_code == 409:
+                print("⚠️ Конфликт 409: старая сессия еще завершается. Ждем 5 сек...")
+                time.sleep(5)
+            else:
+                time.sleep(3)
+        except Exception as e:
+            print(f"⚠️ Ошибка polling: {e}")
+            time.sleep(3)
