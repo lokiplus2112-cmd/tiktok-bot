@@ -45,16 +45,11 @@ def start_cmd(message):
     )
 
 def try_send_from_telegram_preview(message):
-    """
-    Проверяет предпросмотр Telegram (работает для TikTok/Reels, если Telegram сгенерировал файл)
-    """
     if message.message_id in processed_messages:
         return True
 
     if hasattr(message, 'web_page') and message.web_page:
         wp = message.web_page
-        
-        # 1. Проверяем наличие видео в предпросмотре
         if hasattr(wp, 'video') and wp.video:
             try:
                 bot.send_video(
@@ -67,25 +62,9 @@ def try_send_from_telegram_preview(message):
                 return True
             except Exception:
                 pass
-
-        # 2. Проверяем документ
-        if hasattr(wp, 'document') and wp.document:
-            try:
-                bot.send_document(
-                    message.chat.id,
-                    wp.document.file_id,
-                    reply_to_message_id=message.message_id,
-                    caption="⚡ Отправлено из предпросмотра Telegram!"
-                )
-                processed_messages.add(message.message_id)
-                return True
-            except Exception:
-                pass
-
     return False
 
 def check_and_send_video(message, filename, status_msg, caption):
-    """Проверяет размер файла и отправляет видео"""
     file_size = os.path.getsize(filename)
     if file_size > MAX_FILE_SIZE:
         size_mb = round(file_size / (1024 * 1024), 1)
@@ -109,7 +88,6 @@ def check_and_send_video(message, filename, status_msg, caption):
     processed_messages.add(message.message_id)
 
 def parse_og_video_url(url, mirrors):
-    """Извлечение прямого .mp4 из OpenGraph метатегов"""
     for mirror in mirrors:
         try:
             target_url = url
@@ -133,7 +111,6 @@ def parse_og_video_url(url, mirrors):
     return None
 
 def download_file_by_url(video_url, filename):
-    """Скачивание файла по ссылке"""
     res = requests.get(video_url, headers=HEADERS, stream=True, timeout=90)
     res.raise_for_status()
     with open(filename, 'wb') as f:
@@ -204,42 +181,10 @@ def download_instagram(message):
             except Exception:
                 pass
 
-# --- YOUTUBE SHORTS ---
+# --- YOUTUBE SHORTS (С ИСПОЛЬЗОВАНИЕМ COOKIES) ---
 def extract_youtube_id(url):
     match = re.search(r'(?:shorts/|v=|v%3D|be/)([\w-]{11})', url)
     return match.group(1) if match else None
-
-def get_youtube_cobalt_url(video_id):
-    """Получение прямой ссылки через Cobalt API (обходит блокировки IP)"""
-    clean_url = f"https://www.youtube.com/watch?v={video_id}"
-    instances = [
-        "https://api.cobalt.tools/",
-        "https://cobalt-api.kwiatekm.com/"
-    ]
-    
-    payload = {
-        "url": clean_url,
-        "videoQuality": "720",
-        "downloadMode": "auto"
-    }
-    
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    }
-
-    for api_url in instances:
-        try:
-            res = requests.post(api_url, json=payload, headers=headers, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("url"):
-                    return data.get("url")
-                elif data.get("picker"):
-                    return data["picker"][0]["url"]
-        except Exception:
-            continue
-    return None
 
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
@@ -255,29 +200,26 @@ def download_youtube(message):
     filename = os.path.join(temp_dir, f"yt_{uuid.uuid4().hex}.mp4")
 
     try:
-        # Способ 1: Использование API Cobalt
-        direct_url = get_youtube_cobalt_url(video_id)
-        if direct_url and download_file_by_url(direct_url, filename):
-            check_and_send_video(message, filename, status_msg, "✅ YouTube Shorts готово!")
-            return
-
-        # Способ 2 (Резервный): yt-dlp с ограничением качества <= 720p (чтобы обходить лимит 50 МБ)
+        # Настройки yt-dlp с использованием файла cookies.txt и ограничением до 720p (против ошибки 413)
         ydl_opts = {
             'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best',
             'outtmpl': filename,
             'quiet': True,
             'no_warnings': True,
             'socket_timeout': 30,
-            'extractor_args': {'youtube': {'player_client': ['android', 'ios']}}
         }
-        
+
+        # Если файл cookies.txt загружен в корень, используем его
+        if os.path.exists('cookies.txt'):
+            ydl_opts['cookiefile'] = 'cookies.txt'
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
 
         if os.path.exists(filename) and os.path.getsize(filename) > 30000:
             check_and_send_video(message, filename, status_msg, "✅ YouTube Shorts готово!")
         else:
-            bot.edit_message_text("❌ Не удалось загрузить видео с YouTube. Попробуйте еще раз через несколько секунд.", message.chat.id, status_msg.message_id)
+            bot.edit_message_text("❌ Не удалось загрузить видео с YouTube.", message.chat.id, status_msg.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Ошибка скачивания YouTube: {e}", message.chat.id, status_msg.message_id)
