@@ -236,10 +236,17 @@ def download_youtube(message):
 
 # --- ЗАПУСК ---
 if __name__ == '__main__':
-    # 1. Сначала запускаем веб-сервер в отдельном потоке
+    # 1. Запуск Flask веб-сервера
     server_thread = threading.Thread(target=run_web, daemon=True)
     server_thread.start()
     
-    # 2. Запускаем polling бота
-    print("🚀 Бот и сервер запущены!")
+    # 2. Сброс старых подключений к Telegram перед запуском
+    try:
+        bot.remove_webhook()
+        time.sleep(1)
+    except Exception:
+        pass
+
+    # 3. Запуск основного цикла поллинга
+    print("🚀 Бот и веб-сервер запущены!")
     bot.infinity_polling(skip_pending=True)
