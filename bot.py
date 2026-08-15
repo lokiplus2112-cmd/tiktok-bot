@@ -45,12 +45,16 @@ def start_cmd(message):
     )
 
 def try_send_from_telegram_preview(message):
-    """Проверка предпросмотра Telegram (для TikTok/Reels, если там есть готовый видеофайл)"""
+    """
+    Проверяет предпросмотр Telegram и переотправляет видео мгновенно по file_id.
+    """
     if message.message_id in processed_messages:
         return True
 
     if hasattr(message, 'web_page') and message.web_page:
         wp = message.web_page
+        
+        # 1. Проверяем наличие видео в предпросмотре
         if hasattr(wp, 'video') and wp.video:
             try:
                 bot.send_video(
@@ -63,10 +67,30 @@ def try_send_from_telegram_preview(message):
                 return True
             except Exception:
                 pass
+
+        # 2. Проверяем документ
+        if hasattr(wp, 'document') and wp.document:
+            try:
+                bot.send_document(
+                    message.chat.id,
+                    wp.document.file_id,
+                    reply_to_message_id=message.message_id,
+                    caption="⚡ Отправлено из предпросмотра Telegram!"
+                )
+                processed_messages.add(message.message_id)
+                return True
+            except Exception:
+                pass
+
     return False
 
+# --- ОБРАБОТЧИК ОБНОВЛЕНИЯ ПРЕДПРОСМОТРА ---
+@bot.edited_message_handler(func=lambda msg: msg.text and any(d in msg.text for d in ['youtube.com', 'youtu.be', 'tiktok.com', 'instagram.com', 'instagr.am']))
+def handle_edited_preview(message):
+    try_send_from_telegram_preview(message)
+
 def check_and_send_video(message, filename, status_msg, caption):
-    """Проверяет размер и отправляет видео"""
+    """Проверяет размер файла и отправляет видео"""
     file_size = os.path.getsize(filename)
     if file_size > MAX_FILE_SIZE:
         size_mb = round(file_size / (1024 * 1024), 1)
@@ -90,6 +114,7 @@ def check_and_send_video(message, filename, status_msg, caption):
     processed_messages.add(message.message_id)
 
 def parse_og_video_url(url, mirrors):
+    """Извлечение прямого .mp4 из OpenGraph метатегов"""
     for mirror in mirrors:
         try:
             target_url = url
@@ -113,6 +138,7 @@ def parse_og_video_url(url, mirrors):
     return None
 
 def download_file_by_url(video_url, filename):
+    """Скачивание файла по внешней ссылке"""
     res = requests.get(video_url, headers=HEADERS, stream=True, timeout=90)
     res.raise_for_status()
     with open(filename, 'wb') as f:
@@ -183,7 +209,7 @@ def download_instagram(message):
             except Exception:
                 pass
 
-# --- YOUTUBE SHORTS (Через yt-dlp) ---
+# --- YOUTUBE SHORTS (Обход защиты анти-бота через мобильный клиент) ---
 def download_youtube_ytdlp(url, output_path):
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
@@ -191,6 +217,12 @@ def download_youtube_ytdlp(url, output_path):
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 30,
+        # Подменяем клиентов на мобильные, чтобы пройти проверку "Sign in to confirm you're not a bot"
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios'],
+            }
+        }
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
@@ -198,7 +230,11 @@ def download_youtube_ytdlp(url, output_path):
 
 @bot.message_handler(func=lambda msg: msg.text and any(domain in msg.text for domain in ['youtube.com', 'youtu.be']))
 def download_youtube(message):
-    status_msg = bot.reply_to(message, "⏳ Загружаю YouTube Shorts...")
+    # 1. Сначала пробуем перехватить из Telegram-предпросмотра
+    if try_send_from_telegram_preview(message):
+        return
+
+    status_msg = bot.reply_to(message, "⏳ Обрабатываю YouTube Shorts...")
     url = message.text.strip()
 
     temp_dir = tempfile.gettempdir()
