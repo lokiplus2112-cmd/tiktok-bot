@@ -1,5 +1,5 @@
 pyTelegramBotAPI
 requests
 flask
-yt-dlp
+yt-dlp>=2025.01.01
 gunicorn
