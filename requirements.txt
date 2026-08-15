@@ -1,5 +1,5 @@
 pyTelegramBotAPI
 requests
-flask
-yt-dlp>=2026.01.01
+Flask
+yt-dlp>=2024.01.01
 gunicorn
